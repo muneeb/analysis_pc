@@ -1,0 +1,14 @@
+#!/bin/bash
+
+SAMPLES_DIR="/home/muneeb/sdist_lt/mem_stride_samples/gcc-166/"
+
+SAMPLE_FILES=$(ls ${SAMPLES_DIR}sample.*)
+
+for file in ${SAMPLE_FILES}
+do
+
+    ./sdistprint.py ${SAMPLES_DIR}${file} > .tmp
+
+    
+
+done

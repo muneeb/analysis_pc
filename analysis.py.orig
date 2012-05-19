@@ -1,0 +1,333 @@
+#!/usr/bin/python
+import sys
+import inspect
+import math
+import Gnuplot
+from optparse import OptionParser
+from matplotlib import pyplot
+
+import uart.sample_filter as sample_filter
+
+import pyusf
+import utils
+import rndmodel
+import lrumodel
+import lruntamodel
+
+__version__ = "$Revision: 1088 $"
+
+
+class OutputFile:
+    """Base class for file output"""
+
+    def __init__(self, file_name):
+        try:
+            if file_name:
+                self.file = open(file_name, "w")
+            else:
+                self.file = sys.stdout
+        except IOError, e:
+            print >> sys.stderr, "Failed to open output file: %s" % str(e)
+            sys.exit(1)
+
+    def output(self, miss_ratio, name=""):
+        pass
+
+    def show(self):
+        pass
+
+class OutputRaw(OutputFile):
+    """Output in raw format"""
+
+    def __init__(self, output_file_name, **kwargs):
+        OutputFile.__init__(self, output_file_name)
+
+    def output(self, miss_ratio, name=""):
+        print >> self.file, miss_ratio
+
+
+class OutputGnuPlot(OutputFile):
+    """Output in GnuPlot format"""
+
+    def __init__(self, output_file_name, **kwargs):
+        OutputFile.__init__(self, output_file_name)
+
+    def output(self, miss_ratio, name=""):
+        for (c, m) in miss_ratio:
+            print >> self.file, "%d, %f" % (c, m)
+
+class OutputEPS:
+    """Output in EPS"""
+
+    def __init__(self, **kwargs):
+        pass
+
+    def output(self, miss_ratio, name=""):
+        g = Gnuplot.Gnuplot()
+        g("set log x 2")
+        g("set data style lines")
+        g("set term postscript enhanced")
+        g.plot(zip(miss_ratio.points_x, miss_ratio.points_y))
+
+class OutputPyPlot:
+    """Display output data graphicaly using PyPlot."""
+
+    def __init__(self, input_file_name="Unknown file", markers=[],
+                 **kwargs):
+        self.min_x = sys.maxint
+        self.max_x = 0
+        self.max_y = 0
+        self.show_legend = False
+
+        pyplot.hold(True)
+        pyplot.title("Miss ratio (%s)" % input_file_name)
+        pyplot.ylabel("Miss ratio")
+        pyplot.xlabel("Cache size (B)")
+        pyplot.xscale('log', basex = 2)
+        for marker in markers:
+            pyplot.axvline(marker);
+
+    def output(self, miss_ratio, name=""):
+        x_values = miss_ratio.points_x
+        y_values = miss_ratio.points_y
+
+        self.min_x = min(min(x_values), self.min_x)
+        self.max_x = max(max(x_values), self.max_x)
+        self.max_y = max(max(y_values), self.max_y)
+
+        pyplot.plot(x_values, y_values, label=name)
+        if name:
+            self.show_legend = True
+
+    def show(self):
+        pyplot.axis([self.min_x, self.max_x, 0, self.max_y])
+        if self.show_legend:
+            pyplot.legend()
+        pyplot.hold(False)
+        pyplot.show()
+
+class ModelRdistFuncBase:
+    """LRU replacement model, aka StatStack"""
+    def __init__(self, file_name, line_size, filter, func):
+        self.histograms = list(utils.parse_usf(file_name,
+                                               line_size=line_size,
+                                               filter=filter))
+        self.func = func
+
+    def miss_ratio_range(self, cache_size_range):
+        rdist_hist_list  = map(lambda (h, f): h, self.histograms)
+        frdist_hist_list = map(lambda (h, f): f, self.histograms)
+
+        return self.func(rdist_hist_list, cache_size_range,
+                         filtered_rdist_hist_list = frdist_hist_list)
+
+class ModelLRU(ModelRdistFuncBase):
+    """LRU replacement model, aka StatStack"""
+    def __init__(self, file_name, line_size, filter, **kwargs):
+        ModelRdistFuncBase.__init__(self, file_name, line_size, filter,
+                                    lrumodel.miss_ratio_range)
+
+    def display_name(self):
+        return "LRU"
+
+class ModelRandom(ModelRdistFuncBase):
+    """Random replacement model, aka Statcache"""
+    def __init__(self, file_name, line_size, filter, **kwargs):
+        ModelRdistFuncBase.__init__(self, file_name, line_size, filter,
+                                    rndmodel.miss_ratio_range)
+
+    def display_name(self):
+        return "Random"
+
+class ModelLRUNTA:
+    """Experimental LRU model with NTA supprot"""
+    def __init__(self, file_name, line_size, filter, patch_list, **kwargs):
+        try:
+            usf_file = pyusf.Usf()
+            usf_file.open(file_name)
+        except IOError, e:
+            print >> sys.stderr, "Error: %s" % str(e)
+            sys.exit(1)
+
+        self.model = lruntamodel.LRUNTAModel(usf_file, line_size,
+                                             filter, patch_list)
+
+    def miss_ratio_range(self, cache_size_range):
+        return self.model.miss_ratio_range(cache_size_range)
+
+    def display_name(self):
+        return "LRU with NTA"
+
+class Args:
+    output_formats = {
+        "raw" : OutputRaw,
+        "eps" : OutputEPS,
+        "gnuplot" : OutputGnuPlot,
+        "pyplot" : OutputPyPlot,
+        }
+    model_names = {
+        "lru" : ModelLRU,
+        "rnd" : ModelRandom,
+        "lru_nta" : ModelLRUNTA
+        }
+    def __init__(self):
+        self.ofile_name = None
+        self.ifile_name = None
+        self.pfile_name = None
+        self.cache_size_range = None
+        self.models = None
+        self.oformat = None
+        self.line_size = 64
+        self.markers = []
+
+    def parse(self):
+        def pow2(x):
+            return int(math.pow(2, x))
+
+        def pow2_range(l, u):
+            return map(pow2, range(l, u))
+
+        def default_range_func():
+            return pow2_range(10, 24)
+
+        usage = "usage: %prog [OPTIONS...] INFILE"
+        parser = OptionParser(usage)
+
+        parser.add_option("-o", "--out-file",
+                          type="str", default=None,
+                          dest="ofile_name",
+                          help="Output file name",
+                          metavar="FILE")
+
+        parser.add_option("-c", "--cache-size",
+                          type="str", default="default_range_func()",
+                          dest="cache_size_range",
+                          help="Cache size range in bytes (python expr)")
+
+        parser.add_option("-m", "--model",
+                          type="str", action="append", default=[],
+                          dest="models",
+                          help="Replacement policy")
+
+        parser.add_option("-f", "--out-format",
+                          type="str", default="raw",
+                          dest="oformat",
+                          help="Output format, 'help' for a list")
+
+        parser.add_option("-e", "--event-filter",
+                          type="str", default="all()",
+                          dest="filter",
+                          help="Filter for events when aggregating miss-ratio.")
+
+        parser.add_option("--help-filters",
+                          action="callback", callback=self.help_filters,
+                          help="Display help about the filter language.")
+
+        parser.add_option("-p", "--patch",
+                          type="str", default=None,
+                          dest="pfile_name",
+                          help="Patch file to use for NTA models",
+                          metavar="FILE")
+
+        parser.add_option("--marker",
+                          type="int", action="append", default=[],
+                          dest="markers",
+                          help="Add marker.")
+
+        (opts, args) = parser.parse_args()
+        if not opts.models:
+            opts.models = [ "rnd" ]
+
+        if opts.oformat == "help":
+            self.help_algorithms()
+            sys.exit(0)
+        elif not opts.oformat in self.output_formats:
+            print >> sys.stderr, "Invalid output format."
+            sys.exit(1)
+
+        if "help" in opts.models:
+            self.help_models()
+            sys.exit(0)
+        elif not all(map(lambda v: v in self.model_names, opts.models)):
+            print >> sys.stderr, "Invalid model name."
+            sys.exit(1)
+
+        if len(args) == 0:
+            print >> sys.stderr, "No input file specified."
+            sys.exit(1)
+
+        self.ofile_name = opts.ofile_name
+        self.models = map(lambda v: self.model_names[v], opts.models)
+        self.oformat = self.output_formats[opts.oformat]
+        self.cache_size_range = map(lambda x: x / self.line_size,
+                                    eval(opts.cache_size_range))
+        self.filter = sample_filter.from_cmd_opt(opts.filter)
+        self.pfile_name = opts.pfile_name
+        self.ifile_name = args[0]
+        self.markers = opts.markers
+
+    def help_filters(self, option, opt, value, parser):
+        sample_filter.usage()
+        sys.exit(0)
+
+    def help_algorithms(self, file=sys.stdout):
+        print >> file, "Available output formats:"
+        for (name, format_class) in self.output_formats.items():
+            print >> file, "  %s - %s" % (name, inspect.getdoc(format_class))
+
+    def help_models(self, file=sys.stdout):
+        print >> file, "Available models:"
+        for (name, model_class) in self.model_names.items():
+            print >> file, "  %s - %s" % (name, inspect.getdoc(model_class))
+
+def read_patch(pfile_name):
+    try:
+        patch_file = open(pfile_name, "r")
+    except IOError, e:
+        print >> sys.stderr, "Failed to open patch file: %s" % str(e)
+        sys.exit(1)
+
+    patches = []
+    for line in patch_file:
+        trimmed = line.strip()
+        if trimmed == "" or trimmed[0] == "#":
+            continue
+
+        (addr, type) = trimmed.split(":")
+        if type != "nta":
+            print >> sys.stderr, \
+                "Warning: Patch file contains non-nta patch (%s)" % type
+            continue
+
+        patches.append(int(addr, 0))
+
+    return patches
+
+
+def main():
+    args = Args()
+    args.parse()
+
+    if args.pfile_name != None:
+        patches = read_patch(args.pfile_name)
+    else:
+        patches = []
+
+    out = args.oformat(output_file_name=args.ofile_name,
+                       input_file_name=args.ifile_name,
+                       markers=args.markers)
+    for model_class in args.models:
+        model = model_class(args.ifile_name,
+                            line_size=args.line_size,
+                            filter=args.filter,
+                            patch_list=patches)
+        miss_ratio = model.miss_ratio_range(args.cache_size_range)
+        miss_ratio.scale_x(args.line_size)
+
+        out.output(miss_ratio, name=model.display_name())
+
+    out.show()
+
+if __name__ == "__main__":
+    main()
+
