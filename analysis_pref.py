@@ -129,18 +129,6 @@ def reduce_stride_hist(pc_stride_hist):
     
     hist = {}
 
-#    c = 0
-#    avg_stride_count = 0
-#    for (pc, stride_hist) in pc_stride_hist.items():
-        
-#        for (stride, count) in stride_hist.items():
-#            if stride == 0 or count == 1:
-#                continue
-#            avg_stride_count +=  count
-#            c += 1 
- 
-#    avg_stride_count = math.floor(float(avg_stride_count) / float(c))
-
     for (pc, stride_hist) in pc_stride_hist.items():
         
         for (stride, count) in stride_hist.items():
@@ -249,17 +237,19 @@ def prefetchable_pcs(burst_hists):
 
     for (pc, sdist_hist) in pc_sdist_hist.items():
     
+        #considering L1$ size == 64kB (1024 cache lines)
         if max(sdist_hist.keys()) > 1024:
-            #in case of a dangling pointer, there will be no entry in pc_recur_hist
+            #in case of a dangling pointer, there will be no entry in pc_recur_hist so always prefetch and set eviction to memory
             if pc in pc_recur_hist:
                 if max(pc_recur_hist[pc].keys()) < 512:
                     pref_pcs.append(pc)
-                #prefetch but dont set eviction bits
+                #prefetch but dont set eviction bits - even if there are chances of being evicted without being used, it will still be used some times
                 elif len(pc_recur_hist[pc].keys()) > 1:
                     pref_pcs.append(pc)
 #                else:
 #                    print pc_recur_hist[pc]
             else:
+                #also set evition to memory for this case
                 pref_pcs.append(pc)
 
 
@@ -288,11 +278,13 @@ def build_global_prefetchable_pcs(burst_hists, global_pc_stride_hist, global_pre
 
         reduced_pc_stride_hist = reduce_stride_hist(pc_stride_hist)
 
+        remove_pcs = []
+
         for pc in pref_pcs:
             
             if pc in global_pc_stride_hist:
                 if len(global_pc_stride_hist[pc]) > 1:
-                    pref_pcs.remove(pc)
+                    remove_pcs.append(pc)
                     if pc in global_prefetchable_pcs:
                         global_prefetchable_pcs.remove(pc)
 
@@ -302,13 +294,18 @@ def build_global_prefetchable_pcs(burst_hists, global_pc_stride_hist, global_pre
                         global_pc_stride_hist[pc][stride] += reduced_pc_stride_hist[pc][stride]
                     else:
                         global_pc_stride_hist[pc][stride] = stride
-                    
-    
+
             else:
-                
+
                 global_pc_stride_hist[pc] = reduced_pc_stride_hist[pc]
             
                 
+        for pc in remove_pcs:
+            pref_pcs.remove(pc)
+
+    for pc in pref_pcs:
+        if not pc in global_prefetchable_pcs:
+            global_prefetchable_pcs.append(pc);
 
 
 def main():
@@ -354,10 +351,6 @@ def main():
                 
         build_global_prefetchable_pcs(burst_hists, global_pc_stride_hist, global_prefetchable_pcs, pref_pcs)
 
-        for pc in pref_pcs:
-            if not pc in global_prefetchable_pcs:
-                global_prefetchable_pcs.append(pc);
-
 
     for infile in listing:
 
@@ -387,9 +380,14 @@ def main():
         
         pref_pcs = prefetchable_pcs(burst_hists)
 
+        remove_pcs = []
+
         for pc in pref_pcs:
             if not pc in global_prefetchable_pcs:
-                pref_pcs.remove(pc);
+                remove_pcs.append(pc)
+
+        for pc in remove_pcs:
+            pref_pcs.remove(pc)
 
         rdist_hist_w_pf = rdist_hist_after_prefetching(burst_hists, pref_pcs)
     
