@@ -326,15 +326,22 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_stride_hist, globa
         for stride in global_pc_stride_hist[pc].keys():
             None
 
+        if global_pc_stride_hist[pc][stride] < 25 and pf_type == 'pf':
+            continue
 
-        if stride > cache_line_size:
+        if abs(stride) > cache_line_size:
             sd = stride * math.ceil(float(10) / float(min_r))
         else:
-            sd = cache_line_size * math.ceil(float(5) / float(min_r))
+#            sd = (stride/abs(stride)) * cache_line_size * math.ceil(float(10) / float(min_r))
+            sd = (stride/abs(stride)) * cache_line_size * math.ceil(float(cache_line_size / stride) / float(min_r))
 
-            
-        print"%ld:%s:%d"%(pc, pf_type,sd)
+        if pf_type == 'pf':
+            continue
 
+        sd = 0 
+
+        print"%ld:%s:%d"%(pc, pf_type, sd)
+#        print global_pc_stride_hist[pc]
 
 def main():
     conf = Conf()
