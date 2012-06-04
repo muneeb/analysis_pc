@@ -52,6 +52,39 @@ def addto_pc_time_hist(pc_time_hist, pc, time):
         pc_time_hist[pc] = {}
         pc_time_hist[pc][time] = 1
 
+def addto_pc_to_pc_corr_hist(pc_corr_hist, start_pc, end_pc):
+
+#   pc_corr_hist -> { start_pc: { end_pc: count } }
+
+    if pc_corr_hist.has_key(start_pc):
+        pc_corr_hist[start_pc][end_pc] = pc_corr_hist[start_pc].get(end_pc, 0) + 1
+
+    else:
+        pc_corr_hist[start_pc] = {}
+        pc_corr_hist[start_pc][end_pc] = 1
+
+def addto_pc_line_hist(pc_line_hist, pc, line):
+
+#   pc_line_hist -> { pc: { line_addr: count } }
+
+    if pc_line_hist.has_key(pc):
+        pc_line_hist[pc][line] = pc_line_hist[pc].get(line, 0) + 1
+
+    else:
+        pc_line_hist[pc] = {}
+        pc_line_hist[pc][line] = 1
+
+def addto_line_rdist_hist(line_rdist_hist, line, rdist):
+
+#   line_rdist_hist -> { line_addr: { rdist: count } }
+
+    if line_rdist_hist.has_key(line):
+        line_rdist_hist[line][rdist] = line_rdist_hist[line].get(line, 0) + 1
+
+    else:
+        line_rdist_hist[line] = {}
+        line_rdist_hist[line][rdist] = 1
+
 
 def filter_true(begin, end, rdist):
     return True
@@ -62,12 +95,12 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
     assert(not (usf_file.header.flags & pyusf.USF_FLAG_TRACE))
     burst_mode = usf_file.header.flags & pyusf.USF_FLAG_BURST
     if not burst_mode:
-        rdist_burst_hist.append(({}, {}, {}, {}))
+        rdist_burst_hist.append(({}, {}, {}, {}, {}))
 
     for event in usf_file:
         if isinstance(event, pyusf.Burst):
             if burst_mode:
-                rdist_burst_hist.append(({}, {}, {}, {}))
+                rdist_burst_hist.append(({}, {}, {}, {}, {}))
             else:
                 print >> sys.stderr, "Warning: Ignored burst event in " \
                     "non-burst file."
@@ -80,7 +113,7 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
         if (1 << event.line_size) != line_size:
             continue
 
-        (pc_rdist_hist, pc_stride_hist, pc_freq_hist, pc_time_hist) = rdist_burst_hist[-1]
+        (pc_rdist_hist, pc_stride_hist, pc_freq_hist, pc_time_hist, pc_corr_hist) = rdist_burst_hist[-1]
 
         if isinstance(event, pyusf.Sample):
 #            assert(event.begin.time < event.end.time)
@@ -90,6 +123,7 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
             rdist = event.end.time - event.begin.time - 1
             addto_pc_rdist_hist(pc_rdist_hist, event.begin.pc, rdist)
             addto_pc_freq_hist(pc_freq_hist, event.begin.pc)
+            addto_pc_to_pc_corr_hist(pc_corr_hist, event.begin.pc, event.end.pc)
         elif isinstance(event, pyusf.Stride):
 #            assert(event.begin.time <= event.end.time)
             if not event.begin.time < event.end.time:
