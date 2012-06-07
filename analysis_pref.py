@@ -198,8 +198,6 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
                 sd  = int(round(r2s[recur]))
                 pc_recur_hist[pc][sd] = pc_recur_hist[pc].get(sd, 0) + count
 
-#                pc_recur_hist[pc][recur] = count
-
     return [pc_sdist_hist, pc_recur_hist]
 
 def prefetchable_pcs(burst_hists):
@@ -333,6 +331,9 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_sdist_hist):
         if p_pc in checked_pcs:
             continue
 
+        if p_pc not in global_pc_corr_hist:
+            continue
+
         total_count = sum(global_pc_corr_hist[p_pc].values())
 
         for end_pc in global_pc_corr_hist[p_pc].keys():
@@ -358,8 +359,7 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_sdist_hist):
         
         checked_pcs.append(p_pc)
 
-#    print >> sys.stderr, pending_pcs
-#    print >> sys.stderr, checked_pcs
+
     
     return True
 
@@ -452,7 +452,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_sdist_hist, global
         # omnetpp XXX, 8.7 (6 works best)
         # soplex XXX, 6 (5 works best)
         # astar XXX, 3.6 (3.2 works best)
-        # cigar XXX, 13.4
+        # cigar XXX, 13.4 (2,4 works best)
+	# cigar-60k 18.4 (9 works)
 	# sphinx XXX, 2.7
 
         if abs(stride) < cache_line_size:
@@ -462,7 +463,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_sdist_hist, global
             if no_iters == 0:
                 no_iters = 1
 
-            pd = math.ceil(float(150) / float(avg_r * 6.0 * no_iters ))
+            pd = math.ceil(float(150) / float(avg_r * 1.3 * no_iters ))
 
 
             if pd == 0:
@@ -474,7 +475,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_sdist_hist, global
             
             no_iters = 1
 
-            pd = math.ceil(float(150) / float(avg_r * 6.0 * no_iters))
+            pd = math.ceil(float(150) / float(avg_r * 1.3 * no_iters))
 
 
             if pd == 0:
@@ -483,7 +484,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_sdist_hist, global
             sd = stride * pd
 
         print >> sys.stderr, pc
-        print >> sys.stderr, stride
+        print >> sys.stderr, global_pc_corr_hist[pc]
+        print >> sys.stderr, stride, pd
 #        print >> sys.stderr, non_l1_sdist_list
 #        print >> sys.stderr, global_pc_sdist_hist[pc]
         print >> sys.stderr, "full:", full_pc_stride_hist[pc]
