@@ -23,6 +23,17 @@ def addto_pc_rdist_hist(pc_rdist_hist, pc, rdist):
         pc_rdist_hist[pc] = {}
         pc_rdist_hist[pc][rdist] = 1
 
+def addto_pc_fwd_rdist_hist(pc_fwd_rdist_hist, pc, rdist):
+
+#   pc_fwd_rdist_hist -> { pc: { rdist: count } }
+
+    if pc_fwd_rdist_hist.has_key(pc):
+        pc_fwd_rdist_hist[pc][rdist] = pc_fwd_rdist_hist[pc].get(rdist, 0) + 1
+
+    else:
+        pc_fwd_rdist_hist[pc] = {}
+        pc_fwd_rdist_hist[pc][rdist] = 1
+
 def addto_pc_stride_hist(pc_stride_hist, pc, stride):
 
 #   pc_stride_hist -> { pc: { stride: count } }
@@ -95,12 +106,12 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
     assert(not (usf_file.header.flags & pyusf.USF_FLAG_TRACE))
     burst_mode = usf_file.header.flags & pyusf.USF_FLAG_BURST
     if not burst_mode:
-        rdist_burst_hist.append(({}, {}, {}, {}, {}))
+        rdist_burst_hist.append(({}, {}, {}, {}, {}, {}))
 
     for event in usf_file:
         if isinstance(event, pyusf.Burst):
             if burst_mode:
-                rdist_burst_hist.append(({}, {}, {}, {}, {}))
+                rdist_burst_hist.append(({}, {}, {}, {}, {}, {}))
             else:
                 print >> sys.stderr, "Warning: Ignored burst event in " \
                     "non-burst file."
@@ -113,7 +124,7 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
         if (1 << event.line_size) != line_size:
             continue
 
-        (pc_rdist_hist, pc_stride_hist, pc_freq_hist, pc_time_hist, pc_corr_hist) = rdist_burst_hist[-1]
+        (pc_rdist_hist, pc_stride_hist, pc_freq_hist, pc_time_hist, pc_corr_hist, pc_fwd_rdist_hist) = rdist_burst_hist[-1]
 
         if isinstance(event, pyusf.Sample):
 #            assert(event.begin.time < event.end.time)
@@ -121,7 +132,8 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
                 print >> sys.stderr, "error: event.begin.time NOT < event.end.time"
                 continue
             rdist = event.end.time - event.begin.time - 1
-            addto_pc_rdist_hist(pc_rdist_hist, event.begin.pc, rdist)
+            addto_pc_rdist_hist(pc_rdist_hist, event.end.pc, rdist)
+            addto_pc_fwd_rdist_hist(pc_fwd_rdist_hist, event.begin.pc, rdist)
             addto_pc_freq_hist(pc_freq_hist, event.begin.pc)
             addto_pc_to_pc_corr_hist(pc_corr_hist, event.begin.pc, event.end.pc)
         elif isinstance(event, pyusf.Stride):
@@ -136,6 +148,7 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
         else:
             rdist = sys.maxint
             addto_pc_rdist_hist(pc_rdist_hist, event.begin.pc, rdist)
+            addto_pc_fwd_rdist_hist(pc_fwd_rdist_hist, event.begin.pc, rdist)
             addto_pc_freq_hist(pc_freq_hist, event.begin.pc)
 
 
