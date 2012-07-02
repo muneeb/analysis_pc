@@ -37,6 +37,27 @@ class Conf:
                           dest="cyc_per_mop",
                           help="Cycles per memory operation for this benchmark. ")
 
+        parser.add_option("--mem-lat",
+                          type="float", default="170",
+                          dest="memory_latency",
+                          help="Average Memory latency ")
+        
+        parser.add_option("--l1-lat",
+                          type="float", default="2",
+                          dest="l1_latency",
+                          help="Average L1 cache latency ")
+
+        parser.add_option("--l2-lat",
+                          type="float", default="20",
+                          dest="l2_latency",
+                          help="Average L2 cache latency ")
+
+        parser.add_option("--l3-lat",
+                          type="float", default="45",
+                          dest="l3_latency",
+                          help="Average L3 cache latency ")
+
+
         parser.add_option("-p", "--path",
                           type="str", default=os.curdir,
                           dest="path",
@@ -69,6 +90,10 @@ class Conf:
         self.path = opts.path
         self.analysis_type = opts.analysis_type
         self.cyc_per_mop = opts.cyc_per_mop
+        self.l3_latency = opts.l3_latency
+        self.l2_latency = opts.l2_latency
+        self.l1_latency = opts.l1_latency
+        self.memory_latency = opts.memory_latency
 
     def help_filters(self, option, opt, value, parser):
         sample_filter.usage()
@@ -236,21 +261,7 @@ def prefetchable_pcs(burst_hists):
     for (pc, sdist_hist) in pc_sdist_hist.items():
     
         #considering L1$ size == 64kB (1024 cache lines)
-        if max(sdist_hist.keys()) > 1100:
-
-#            non_l1_sdist_count = 0
-
-#            for (sdist, count) in sdist_hist.items():
-#                if sdist > 1024:
-#                    non_l1_sdist_count += count
-
-#            total_sdist_count = sum(sdist_hist.values())
-
-#            non_l1_sdist_ratio = float(float(non_l1_sdist_count) / float(total_sdist_count))
-
-            #if non_l1_sdist_ratio < 0.15:
-            #    continue
-                #print >> sys.stderr,"non_l1_sdist_ratio %lf"%(non_l1_sdist_ratio)
+        if max(sdist_hist.keys()) > 1024:
 
             #in case of a dangling pointer, there "may" be no entry in pc_recur_hist 
             if pc in pc_recur_hist:
@@ -259,7 +270,7 @@ def prefetchable_pcs(burst_hists):
                 if  max_recur < 768:
                     pref_pcs.append(pc)
                 else:
-                    #prefetch but dont set eviction bits - even if there are chances of being evicted without being used, it will still be used some times
+                    #need some clear strategy for nested loops, where outer loop's recurrence may be larger than L1 cache
                     total_recur_count = sum(pc_recur_hist[pc].itervalues()) 
                     max_recur_freq = float(float(pc_recur_hist[pc][max_recur])/float(total_recur_count) )
 
@@ -289,7 +300,7 @@ def build_global_pc_corr_hist(global_pc_corr_hist, pc_corr_hist):
                 global_pc_corr_hist[start_pc][end_pc] = count
 
 
-def build_global_pc_fwd_sdist_recur_hist(global_pc_fwd_sdist_hist, global_pc_recur_hist, pc_fwd_sdist_hist, pc_recur_hist):
+def build_global_pc_fwd_sdist_recur_hist(global_pc_fwd_sdist_hist, global_pc_recur_hist, pc_fwd_sdist_hist, pc_recur_hist, global_pc_sdist_hist, pc_sdist_hist):
 
     for (pc, fwd_sdist_hist) in pc_fwd_sdist_hist.items():
         if pc in global_pc_fwd_sdist_hist:
@@ -299,6 +310,15 @@ def build_global_pc_fwd_sdist_recur_hist(global_pc_fwd_sdist_hist, global_pc_rec
             global_pc_fwd_sdist_hist[pc] = {} 
             for (sdist, count) in fwd_sdist_hist.items():
                 global_pc_fwd_sdist_hist[pc][sdist] = count
+
+    for (pc, sdist_hist) in pc_sdist_hist.items():
+        if pc in global_pc_sdist_hist:
+            for (sdist, count) in sdist_hist.items():
+                global_pc_sdist_hist[pc][sdist] = global_pc_sdist_hist[pc].get(sdist, 0) + count
+        else:
+            global_pc_sdist_hist[pc] = {} 
+            for (sdist, count) in sdist_hist.items():
+                global_pc_sdist_hist[pc][sdist] = count
 
 
     for (pc, recur_hist) in pc_recur_hist.items():
@@ -401,9 +421,18 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist):
     return True
 
 
-def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, analysis_type, cyc_per_mop):
+def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf):
 
     cache_line_size = 64
+
+    avg_mem_latency = 150
+
+    analysis_type = conf.analysis_type
+    cyc_per_mop = conf.cyc_per_mop
+    memory_latency = conf.memory_latency
+    l3_latency = conf.l3_latency
+    l2_latency = conf.l2_latency
+    l1_latency = conf.l1_latency
 
     remove_pcs = []
 
@@ -418,6 +447,17 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             continue
 
         pf_type = 'pf'
+
+        total_accesses = sum(global_pc_sdist_hist[pc].values())
+
+#        non_l1_accesses = 0
+#        for (sdist, count) in global_pc_sdist_hist[pc].items():
+#            if sdist > 1024:
+#                non_l1_accesses += count
+            
+
+#        if float(float(non_l1_accesses)/float(total_accesses) < 0.01):
+#            continue
 
         if analysis_type == "aggr" and pc in global_pc_fwd_sdist_hist.keys():
 
@@ -463,6 +503,28 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         if (abs(stride) * max_count) <= cache_line_size:
             continue
 
+        
+        if max(global_pc_sdist_hist[pc].keys()) > 98304:
+            avg_mem_latency = memory_latency 
+        elif max(global_pc_sdist_hist[pc].keys()) > 8192 and max(global_pc_sdist_hist[pc].keys()) < 98304:
+            avg_mem_latency = l3_latency 
+        elif max(global_pc_sdist_hist[pc].keys()) > 1024 and max(global_pc_sdist_hist[pc].keys()) < 8192:
+            avg_mem_latency = l2_latency
+
+        total_count = sum(global_pc_sdist_hist[pc].values())
+#        mem_count = l3_count = l2_count = l1_count = 0
+#        for (sdist, count) in global_pc_sdist_hist[pc].items():
+#            if sdist > 98304:
+#                mem_count += count
+#            elif sdist > 8192 and sdist < 98304:
+#                l3_count += count
+#            elif sdist > 1024 and sdist < 8192:
+#                l2_count += count
+#            else:
+#                l1_count += count
+
+#        avg_mem_latency = float(float(l1_count)/float(total_count)*float(l1_latency)) + float(float(l2_count)/float(total_count)*float(l2_latency)) + float(float(l3_count)/float(total_count)*float(l3_latency)) + float(float(mem_count)/float(total_count)*float(memory_latency))
+
 
         sorted_x = sorted(global_pc_recur_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
 
@@ -494,7 +556,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         # astar XXX, 3.6 (3.2 works best, 3.2)
         # cigar XXX, 13.4 (2,4 works best)
 	# cigar-60k 18.4 (9 works, 9)
-	# sphinx XXX, 2.7
+	# xalan XXX 2.99 (2.8)
 
         if abs(stride) < cache_line_size:
 
@@ -503,7 +565,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             if no_iters == 0:
                 no_iters = 1
 
-            pd = math.ceil(float(150) / float(avg_r * cyc_per_mop * no_iters ))
+            pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters ))
 
             if pd == 0:
                 pd = 1 
@@ -518,7 +580,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             
             no_iters = 1
 
-            pd = math.ceil(float(150) / float(avg_r * cyc_per_mop * no_iters))
+            pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters))
 
             if pd == 0:
                 pd = 1 
@@ -528,16 +590,17 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             if full_pc_stride_hist[pc][stride] < pd:
                 sd = stride * 2
-
+            
         print >> sys.stderr, pc
-        if pc in global_pc_corr_hist.keys():
-            print >> sys.stderr, global_pc_corr_hist[pc]
-        else:
-            print >> sys.stderr, "{NULL}"
+        print >> sys.stderr, total_count, avg_mem_latency
+#        if pc in global_pc_corr_hist.keys():
+#            print >> sys.stderr, global_pc_corr_hist[pc]
+#        else:
+#            print >> sys.stderr, "{NULL}"
         print >> sys.stderr, stride, pd
-        print >> sys.stderr, "full:", full_pc_stride_hist[pc]
-        if (full_pc_stride_hist[pc][stride]) < pd:
-            print >> sys.stderr, "not including"
+#        print >> sys.stderr, "full:", full_pc_stride_hist[pc]
+#        if (full_pc_stride_hist[pc][stride]) < pd:
+#            print >> sys.stderr, "not including"
 
         print >> sys.stderr, "\n\n\n"
                 
@@ -563,6 +626,8 @@ def main():
     full_pc_stride_hist = {}
 
     global_pc_fwd_sdist_hist = {}
+
+    global_pc_sdist_hist = {}
 
     global_pc_corr_hist = {}
 
@@ -610,10 +675,10 @@ def main():
 
         build_global_pc_corr_hist(global_pc_corr_hist, pc_corr_hist)
 
-        build_global_pc_fwd_sdist_recur_hist(global_pc_fwd_sdist_hist, global_pc_recur_hist, pc_fwd_sdist_hist, pc_recur_hist)
+        build_global_pc_fwd_sdist_recur_hist(global_pc_fwd_sdist_hist, global_pc_recur_hist, pc_fwd_sdist_hist, pc_recur_hist, global_pc_sdist_hist, pc_sdist_hist)
 
 
-    generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, conf.analysis_type, conf.cyc_per_mop)
+    generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf)
 
 #    for infile in listing:
 
