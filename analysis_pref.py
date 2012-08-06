@@ -57,6 +57,25 @@ class Conf:
                           dest="l3_latency",
                           help="Average L3 cache latency ")
 
+        parser.add_option("--l1-size",
+                          type="int", default="64",
+                          dest="l1_size",
+                          help="L1 size in kilobytes (KB) ")        
+
+        parser.add_option("--l2-size",
+                          type="int", default="512",
+                          dest="l2_size",
+                          help="L2 size in kilobytes (KB) ")        
+
+        parser.add_option("--l3-size",
+                          type="int", default="6144",
+                          dest="l3_size",
+                          help="L3 size in kilobytes (KB) ")  
+
+        parser.add_option("--all-delinq-loads",
+                          type="int", default="0",
+                          dest="all_delinq_loads",
+                          help="print all delinquent loads ")
 
         parser.add_option("-p", "--path",
                           type="str", default=os.curdir,
@@ -94,6 +113,10 @@ class Conf:
         self.l2_latency = opts.l2_latency
         self.l1_latency = opts.l1_latency
         self.memory_latency = opts.memory_latency
+        self.l3_size = opts.l3_size
+        self.l2_size = opts.l2_size
+        self.l1_size = opts.l1_size
+        self.all_delinq_loads = opts.all_delinq_loads
 
     def help_filters(self, option, opt, value, parser):
         sample_filter.usage()
@@ -246,7 +269,7 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
 
     return [pc_sdist_hist, pc_recur_hist, pc_fwd_sdist_hist]
 
-def prefetchable_pcs(burst_hists):
+def prefetchable_pcs(burst_hists, conf):
 
     sdist_recur_list = generate_per_pc_sdist_recurrence_hist(burst_hists)
 
@@ -261,13 +284,13 @@ def prefetchable_pcs(burst_hists):
     for (pc, sdist_hist) in pc_sdist_hist.items():
     
         #considering L1$ size == 64kB (1024 cache lines)
-        if max(sdist_hist.keys()) > 1024:
+        if max(sdist_hist.keys()) > (conf.l1_size * 1024 / conf.line_size):
 
             #in case of a dangling pointer, there "may" be no entry in pc_recur_hist 
             if pc in pc_recur_hist:
                 max_recur = max(pc_recur_hist[pc].keys())
 
-                if  max_recur < 768:
+                if  max_recur < float(float(0.75) * float(conf.l1_size * 1024 / conf.line_size)):
                     pref_pcs.append(pc)
                 else:
                     #need some clear strategy for nested loops, where outer loop's recurrence may be larger than L1 cache
@@ -374,7 +397,7 @@ def build_full_pc_stride_hist(burst_hists, full_pc_stride_hist):
                 for stride in pc_stride_hist[pc].keys():
                     full_pc_stride_hist[pc][stride] = pc_stride_hist[pc][stride]
 
-def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist):
+def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
 
     checked_pcs = []
 
@@ -404,14 +427,14 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist):
 
                 arrival_prob = float( end_pc_prob * prob)
                 
-                if arrival_prob >= 0.40:
+                if arrival_prob >= 0.4:
                     pending_pcs.append((end_pc, arrival_prob))
 
         sdist_list = global_pc_fwd_sdist_hist[p_pc].keys()
             
         non_l1_sdist_list = filter(lambda x: x > 256, sdist_list)
         
-        if len(non_l1_sdist_list) > 0 and min(non_l1_sdist_list) < 98304:
+        if len(non_l1_sdist_list) > 0 and min(non_l1_sdist_list) < (conf.l3_size * 1024 / conf.line_size):
             return False
         
         checked_pcs.append(p_pc)
@@ -423,8 +446,8 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist):
 
 def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf):
 
-    cache_line_size = 64
-
+    cache_line_size = conf.line_size
+    
     avg_mem_latency = 150
 
     analysis_type = conf.analysis_type
@@ -433,6 +456,11 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     l3_latency = conf.l3_latency
     l2_latency = conf.l2_latency
     l1_latency = conf.l1_latency
+    l3_size = conf.l3_size
+    l2_size = conf.l2_size
+    l1_size = conf.l1_size
+
+    avg_iters = 0
 
     remove_pcs = []
 
@@ -470,7 +498,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                 pf_type = 'nta'
         
 
-        if analysis_type == "cons" and is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist):
+        if analysis_type == "cons" and is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
             pf_type = 'nta'
 
 
@@ -492,11 +520,21 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         if float(float(max_stride_region_count) / float(total_stride_count)) < float(0.5):
             remove_pcs.append(pc)
+#            if bool(conf.all_delinq_loads):
+#                print "%ld:ptr:1"%(pc)
+            non_l1_accesses = 0
+            for (sdist, count) in global_pc_sdist_hist[pc].items():
+                if sdist > 1024:
+                    non_l1_accesses += count
+            
+
+            if float(float(non_l1_accesses)/float(total_accesses) >= 0.005):
+                print"%ld:ptr:1"%(pc)
+                print >> sys.stderr, "irrgeular strided load (miss ratio > 1%): %s", hex(pc)
             continue
 
 
         min_r = min(global_pc_recur_hist[pc].keys())
-
 
         stride = max_stride
 
@@ -504,27 +542,14 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             continue
 
         
-        if max(global_pc_sdist_hist[pc].keys()) > 98304:
+        if max(global_pc_sdist_hist[pc].keys()) > (l3_size * 1024 / cache_line_size):
             avg_mem_latency = memory_latency 
-        elif max(global_pc_sdist_hist[pc].keys()) > 8192 and max(global_pc_sdist_hist[pc].keys()) < 98304:
+        elif max(global_pc_sdist_hist[pc].keys()) > (l2_size * 1024 / cache_line_size) and max(global_pc_sdist_hist[pc].keys()) < (l3_size * 1024 / cache_line_size):
             avg_mem_latency = l3_latency 
-        elif max(global_pc_sdist_hist[pc].keys()) > 1024 and max(global_pc_sdist_hist[pc].keys()) < 8192:
+        elif max(global_pc_sdist_hist[pc].keys()) > (l2_size * 1024 / cache_line_size) and max(global_pc_sdist_hist[pc].keys()) < (l2_size * 1024 / cache_line_size):
             avg_mem_latency = l2_latency
 
         total_count = sum(global_pc_sdist_hist[pc].values())
-#        mem_count = l3_count = l2_count = l1_count = 0
-#        for (sdist, count) in global_pc_sdist_hist[pc].items():
-#            if sdist > 98304:
-#                mem_count += count
-#            elif sdist > 8192 and sdist < 98304:
-#                l3_count += count
-#            elif sdist > 1024 and sdist < 8192:
-#                l2_count += count
-#            else:
-#                l1_count += count
-
-#        avg_mem_latency = float(float(l1_count)/float(total_count)*float(l1_latency)) + float(float(l2_count)/float(total_count)*float(l2_latency)) + float(float(l3_count)/float(total_count)*float(l3_latency)) + float(float(mem_count)/float(total_count)*float(memory_latency))
-
 
         sorted_x = sorted(global_pc_recur_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
 
@@ -546,8 +571,18 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             avg_r = 1
             
 
+        recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) #global_pc_recur_hist[pc].values()
+        recur_freq_thr = int(recur_freq[0])/3
+        recur_freq_out_loop = filter(lambda y: y < recur_freq_thr, recur_freq)
+        loop_recur_freq = sum(recur_freq)
+        loop_reach_freq = sum(recur_freq_out_loop)
+        if loop_reach_freq == 0:
+            loop_reach_freq = 1
+ 
+        avg_iters = float(float(loop_recur_freq)/float(loop_reach_freq))
+
         # cycles/memory-operation (without h/w pf, with h/w pf)
-        # gcc-166 3.74, 3.5 (1.3 works best, 3.4)
+        # gcc-166 3.74, 3.5 (1.3 works best, 3.0)
         # libquantum XXX, 9.2 (2 works best, 7.0)
         # lbm XXX, 5.4 (1.5 works best, 5.0)
         # mcf XXX, 21.2 (12 works best, 18.0)
@@ -573,8 +608,10 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             sd = cache_line_size * pd
 
-            if full_pc_stride_hist[pc][stride] < pd:
-                sd = cache_line_size * 2
+#            if full_pc_stride_hist[pc][stride] < pd:
+#            if avg_iters < pd:
+#                pd = math.ceil(float(avg_iters)/float(2))
+#                sd = cache_line_size * pd #2
 
         else:
             
@@ -588,19 +625,14 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             sd = stride * pd
 
-            if full_pc_stride_hist[pc][stride] < pd:
-                sd = stride * 2
+#            if full_pc_stride_hist[pc][stride] < pd:
+#            if avg_iters < pd:
+#                pd = math.ceil(float(avg_iters)/float(2)) 
+#                sd = stride * pd #2
             
         print >> sys.stderr, pc
-        print >> sys.stderr, total_count, avg_mem_latency
-#        if pc in global_pc_corr_hist.keys():
-#            print >> sys.stderr, global_pc_corr_hist[pc]
-#        else:
-#            print >> sys.stderr, "{NULL}"
-        print >> sys.stderr, stride, pd
-#        print >> sys.stderr, "full:", full_pc_stride_hist[pc]
-#        if (full_pc_stride_hist[pc][stride]) < pd:
-#            print >> sys.stderr, "not including"
+        print >> sys.stderr, total_count
+        print >> sys.stderr, stride, pd, avg_iters
 
         print >> sys.stderr, "\n\n\n"
                 
@@ -655,7 +687,7 @@ def main():
 
         usf_file.close()
 
-        pref_pcs_sdist_recur_list = prefetchable_pcs(burst_hists)
+        pref_pcs_sdist_recur_list = prefetchable_pcs(burst_hists, conf)
         
         pref_pcs = pref_pcs_sdist_recur_list[0]
 
@@ -669,8 +701,6 @@ def main():
 
         build_full_pc_stride_hist(burst_hists, full_pc_stride_hist)
 
-#        print >> sys.stderr, len(burst_hists[0])
-
         pc_corr_hist = burst_hists[0][4]
 
         build_global_pc_corr_hist(global_pc_corr_hist, pc_corr_hist)
@@ -680,87 +710,6 @@ def main():
 
     generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf)
 
-#    for infile in listing:
-
-#        infile = conf.path + infile
-
-#        usf_file = open_sample_file(infile, conf.line_size)
-        
-#        if usf_file == None:
-#            continue
-
-#        try:
-#            burst_hists = utils.usf_read_events(usf_file,
-#                                                line_size=conf.line_size,
-#                                                filter=conf.filter)
-
-#        except IOError, e:
-#            continue
-
-#        usf_file.close()
-
-#        cache_size_range = map(lambda x: x / conf.line_size, cache_size_range)
-
-#        rdist_hist = rdist_hist_original(burst_hists)
-
-#        win_mr = lrumodel.miss_ratio_range([rdist_hist], cache_size_range, filtered_rdist_hist_list = [rdist_hist])
-        
-#        pref_pcs_sdist_recur_list = prefetchable_pcs(burst_hists)
-        
-#        pref_pcs = pref_pcs_sdist_recur_list[0]
-
-#        pc_sdist_hist = pref_pcs_sdist_recur_list[1]
-        
-#        pc_recur_hist = pref_pcs_sdist_recur_list[2]
-
-#        remove_pcs = []
-
-#        for pc in pref_pcs:
-#            if not pc in global_prefetchable_pcs:
-#                remove_pcs.append(pc)
-
-#        for pc in remove_pcs:
-#            pref_pcs.remove(pc)
-
-#        pref_pcs = []
-
-#        for (pc_rdist_hist, pc_stride_hist, pc_freq_hist, pc_time_hist) in burst_hists:
-            
-#            for pc in global_prefetchable_pcs:
-#                if pc in pc_rdist_hist.keys():
-#                    pref_pcs.append(pc)
-
-#        rdist_hist_w_pf = rdist_hist_after_prefetching(burst_hists, pref_pcs)
-    
-#        win_mr_w_pf = lrumodel.miss_ratio_range([rdist_hist], cache_size_range, filtered_rdist_hist_list = [rdist_hist_w_pf])
-
-#        cache_size_range = map(lambda x: x * conf.line_size, cache_size_range)
-
-#        for cache_size in cache_size_range:
-#            mr[cache_size] = mr.get(cache_size, 0) + win_mr._getitem__(cache_size)
-
-#        for cache_size in cache_size_range:
-#             mr_w_pf[cache_size] = mr_w_pf.get(cache_size, 0) + win_mr_w_pf._getitem__(cache_size)
-
-#        win_count += 1
-
-
-#    for (cache_size, miss_ratio) in mr.items():
-#        mr[cache_size] = float(mr.get(cache_size, 0)) / float(win_count)
-
-#    for (cache_size, miss_ratio) in mr_w_pf.items():
-#        mr_w_pf[cache_size] = float(mr_w_pf.get(cache_size, 0)) / float(win_count)
-
-#    mr_items = mr.items()
-#    mr_items.sort(lambda (k0, v0), (k1, v1): cmp(k0, k1))
-
-#    mr_w_pf_items = mr_w_pf.items()
-#    mr_w_pf_items.sort(lambda (k0, v0), (k1, v1): cmp(k0, k1))
-
-#    print "#cache size, fetch ratio, miss ratio (after prefetching)"
-
-#    for (cache_size, miss_ratio) in mr_items:
-#        print"%ld %lf %lf"%(cache_size, miss_ratio, mr_w_pf[cache_size])
 
 
 if __name__ == "__main__":
