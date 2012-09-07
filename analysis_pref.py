@@ -37,6 +37,11 @@ class Conf:
                           dest="cyc_per_mop",
                           help="Cycles per memory operation for this benchmark. ")
 
+        parser.add_option("-n", "--num-samples",
+                          type="int", default=None,
+                          dest="num_samples",
+                          help="Number of samples to be considered for analysis")
+
         parser.add_option("--mem-lat",
                           type="float", default="170",
                           dest="memory_latency",
@@ -87,6 +92,11 @@ class Conf:
                           dest="filter",
                           help="Filter for events to display in histogram.")
 
+        parser.add_option("--stride-only-analysis",
+                          type="int", default="0",
+                          dest="stride_only",
+                          help="only use stride information to generate prefetches")
+
         parser.add_option("--help-filters",
                           action="callback", callback=self.help_filters,
                           help="Display help about the filter language.")
@@ -117,6 +127,8 @@ class Conf:
         self.l2_size = opts.l2_size
         self.l1_size = opts.l1_size
         self.all_delinq_loads = opts.all_delinq_loads
+        self.stride_only = opts.stride_only
+        self.num_samples = opts.num_samples
 
     def help_filters(self, option, opt, value, parser):
         sample_filter.usage()
@@ -443,7 +455,6 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
     
     return True
 
-
 def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf):
 
     cache_line_size = conf.line_size
@@ -465,6 +476,88 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     remove_pcs = []
 
     reduced_full_pc_stride_hist = reduce_stride_hist(full_pc_stride_hist)
+
+    if conf.stride_only == 1:
+
+        pref_pc_sd_hist = {}
+        
+
+        for pc in reduced_full_pc_stride_hist.keys():
+
+            unrolled_loop_mop = 0
+
+            sorted_x = sorted(reduced_full_pc_stride_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
+
+            max_stride = sorted_x[0][0] 
+            max_count = sorted_x[0][1]
+
+            total_stride_count = sum(full_pc_stride_hist[pc].itervalues())
+
+            max_stride_region_count = 0
+            max_stride_region = math.floor(float(max_stride) / float(32))
+                    
+            for s,c in full_pc_stride_hist[pc].items():
+            
+                if math.floor(float(s) / float(32)) == max_stride_region:
+                    max_stride_region_count += c
+
+            if float(float(max_count) / float(total_stride_count)) < float(0.7):
+                continue
+            
+            stride = max_stride
+
+            sorted_x = sorted(global_pc_recur_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
+
+            weight = 0
+            avg_r = 0
+
+            for r, c in sorted_x:
+                avg_r += int(r) * int(c)
+                weight += int(c)
+
+            avg_r = round(float(avg_r)/ float(weight))
+
+            if avg_r == 0:
+                avg_r = 1
+
+            if abs(stride) < cache_line_size:
+                    
+                no_iters = int(round(float(cache_line_size) / float(abs(stride)) )) - 1
+
+                if no_iters == 0:
+                    no_iters = 1
+
+                pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters ))
+                    
+                if pd == 0:
+                    pd = 1 
+                        
+                sd = cache_line_size * pd
+
+            else:
+            
+                no_iters = 1
+
+                pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters))
+
+                if pd == 0:
+                    pd = 1 
+
+                sd = stride * pd
+            
+ #           for pc_x in pref_pc_sd_hist.keys():
+#                if abs(pc_x - pc) <= 50  and pref_pc_sd_hist[pc_x] == sd:
+                    #loop unrolling possibility
+#                    print >> sys.stderr, pc_x, pc, pref_pc_sd_hist[pc_x], sd
+#                    unrolled_loop_mop = 1
+#                    break
+
+            pref_pc_sd_hist[pc] = sd
+
+#            if unrolled_loop_mop == 0:
+            print"%ld:pf:%d"%(pc, int(sd))
+
+        return
 
     for pc in global_prefetchable_pcs:
 
@@ -528,7 +621,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                     non_l1_accesses += count
             
 
-            if float(float(non_l1_accesses)/float(total_accesses) >= 0.005):
+            if float(float(non_l1_accesses)/float(total_accesses) >= 0.005) and bool(conf.all_delinq_loads):
                 print"%ld:ptr:1"%(pc)
                 print >> sys.stderr, "irrgeular strided load (miss ratio > 1%): %s", hex(pc)
             continue
@@ -572,7 +665,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             
 
         recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) #global_pc_recur_hist[pc].values()
-        recur_freq_thr = int(recur_freq[0])/3
+        recur_freq_thr = int(recur_freq[0])/6
         recur_freq_out_loop = filter(lambda y: y < recur_freq_thr, recur_freq)
         loop_recur_freq = sum(recur_freq)
         loop_reach_freq = sum(recur_freq_out_loop)
@@ -589,7 +682,6 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         # omnetpp XXX, 8.7 (6 works best, 7.0)
         # soplex 7.6, 6 (5 works best, 5.7)
         # astar XXX, 3.6 (3.2 works best, 3.2)
-        # cigar XXX, 13.4 (2,4 works best)
 	# cigar-60k 18.4 (9 works, 9)
 	# xalan XXX 2.99 (2.8)
 
@@ -608,10 +700,14 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             sd = cache_line_size * pd
 
+#############################################################
+
 #            if full_pc_stride_hist[pc][stride] < pd:
-#            if avg_iters < pd:
+#            if (avg_iters/2) < pd:
 #                pd = math.ceil(float(avg_iters)/float(2))
 #                sd = cache_line_size * pd #2
+
+#############################################################
 
         else:
             
@@ -625,18 +721,22 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             sd = stride * pd
 
+#############################################################
+
 #            if full_pc_stride_hist[pc][stride] < pd:
-#            if avg_iters < pd:
+#            if (avg_iters/2) < pd:
 #                pd = math.ceil(float(avg_iters)/float(2)) 
 #                sd = stride * pd #2
             
+#############################################################
+
         print >> sys.stderr, pc
         print >> sys.stderr, total_count
-        print >> sys.stderr, stride, pd, avg_iters
+        print >> sys.stderr, stride, pd, sd, avg_iters
 
         print >> sys.stderr, "\n\n\n"
                 
-
+#        if total_count > 50:
         print"%ld:%s:%d"%(pc, pf_type, int(sd))
 
 
@@ -667,6 +767,23 @@ def main():
     
     global_prefetchable_pcs = []
 
+    if not conf.num_samples is None:
+
+        num_sample_files = len(listing)
+
+        files_required = math.ceil(float(conf.num_samples) / float(1200)) + 1 # 1200 is the number of samples per file
+
+        files_sapcing = int(math.floor(float(num_sample_files) / float(files_required)))
+
+        file_no = 0
+
+        listing = []
+        
+        while file_no < num_sample_files:
+            file_name = "sample."+str(file_no)
+            listing.append(file_name)
+            file_no += files_sapcing
+
     for infile in listing:
 
         infile = conf.path + infile
@@ -687,28 +804,30 @@ def main():
 
         usf_file.close()
 
+
         pref_pcs_sdist_recur_list = prefetchable_pcs(burst_hists, conf)
         
         pref_pcs = pref_pcs_sdist_recur_list[0]
-
+        
         pc_sdist_hist = pref_pcs_sdist_recur_list[1]
         
         pc_recur_hist = pref_pcs_sdist_recur_list[2]
-
+            
         pc_fwd_sdist_hist = pref_pcs_sdist_recur_list[3]
-
+        
         build_global_prefetchable_pcs(global_prefetchable_pcs, pref_pcs)
-
-        build_full_pc_stride_hist(burst_hists, full_pc_stride_hist)
-
+        
         pc_corr_hist = burst_hists[0][4]
 
         build_global_pc_corr_hist(global_pc_corr_hist, pc_corr_hist)
 
         build_global_pc_fwd_sdist_recur_hist(global_pc_fwd_sdist_hist, global_pc_recur_hist, pc_fwd_sdist_hist, pc_recur_hist, global_pc_sdist_hist, pc_sdist_hist)
+    
+        build_full_pc_stride_hist(burst_hists, full_pc_stride_hist)
 
 
     generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf)
+
 
 
 
