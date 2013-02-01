@@ -76,6 +76,11 @@ class Conf:
                           type="int", default="6144",
                           dest="l3_size",
                           help="L3 size in kilobytes (KB) ")  
+        
+        parser.add_option("--detailed-modeling",
+                          type="int", default="0",
+                          dest="detailed_modeling",
+                          help="Use detailed modeling")
 
         parser.add_option("--all-delinq-loads",
                           type="int", default="0",
@@ -129,6 +134,7 @@ class Conf:
         self.all_delinq_loads = opts.all_delinq_loads
         self.stride_only = opts.stride_only
         self.num_samples = opts.num_samples
+        self.detailed_modeling = opts.detailed_modeling
 
     def help_filters(self, option, opt, value, parser):
         sample_filter.usage()
@@ -415,6 +421,8 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
 
     pending_pcs = [(pc, 1.0)]
 
+    pc_arr_map = []
+
     for pc_prob_tup in pending_pcs:
         
         p_pc = pc_prob_tup[0]
@@ -442,16 +450,20 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
                 if arrival_prob >= 0.4:
                     pending_pcs.append((end_pc, arrival_prob))
 
+#            pc_arr_map.append((p_pc, end_pc, arrival_prob))
+
         sdist_list = global_pc_fwd_sdist_hist[p_pc].keys()
             
-        non_l1_sdist_list = filter(lambda x: x > 256, sdist_list)
+        non_l1_sdist_list = filter(lambda x: x > 256, sdist_list) # (conf.l1_size/4), sdist_list)
         
         if len(non_l1_sdist_list) > 0 and min(non_l1_sdist_list) < (conf.l3_size * 1024 / conf.line_size):
             return False
         
         checked_pcs.append(p_pc)
 
-
+#    print >> sys.stderr, "data flow"
+#    for tup in pc_arr_map:
+#        print >> sys.stderr, tup
     
     return True
 
@@ -545,7 +557,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
                 sd = stride * pd
             
- #           for pc_x in pref_pc_sd_hist.keys():
+#           for pc_x in pref_pc_sd_hist.keys():
 #                if abs(pc_x - pc) <= 50  and pref_pc_sd_hist[pc_x] == sd:
                     #loop unrolling possibility
 #                    print >> sys.stderr, pc_x, pc, pref_pc_sd_hist[pc_x], sd
@@ -572,13 +584,42 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         total_accesses = sum(global_pc_sdist_hist[pc].values())
 
 #        non_l1_accesses = 0
-#        for (sdist, count) in global_pc_sdist_hist[pc].items():
-#            if sdist > 1024:
-#                non_l1_accesses += count
-            
 
-#        if float(float(non_l1_accesses)/float(total_accesses) < 0.01):
-#            continue
+        if conf.detailed_modeling == 1:
+
+            max_sdist = max(global_pc_sdist_hist[pc].keys())
+
+            if  max_sdist < (conf.l2_size * 1024 / conf.line_size):
+
+                l2_accesses = 0
+
+                for (sdist, count) in global_pc_sdist_hist[pc].items():
+                    if sdist > (conf.l1_size * 1024 / conf.line_size):
+                        l2_accesses += count
+
+                if float(float(l2_accesses)/float(total_accesses)) < 0.1:
+                    continue
+
+            elif max_sdist < (conf.l3_size * 1024 / conf.line_size):
+
+                l3_accesses = 0
+
+                for (sdist, count) in global_pc_sdist_hist[pc].items():
+                    if sdist > (conf.l2_size * 1024 / conf.line_size):
+                        l3_accesses += count
+
+                if float(float(l3_accesses)/float(total_accesses)) < 0.034:
+                    continue
+
+            else:
+                mem_accesses = 0
+
+                for (sdist, count) in global_pc_sdist_hist[pc].items():
+                    if sdist > (conf.l3_size * 1024 / conf.line_size):
+                        mem_accesses += count
+
+                if float(float(mem_accesses)/float(total_accesses)) < 0.01:
+                    continue
 
         if analysis_type == "aggr" and pc in global_pc_fwd_sdist_hist.keys():
 
@@ -591,8 +632,12 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                 pf_type = 'nta'
         
 
-        if analysis_type == "cons" and is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
-            pf_type = 'nta'
+        isnontemporal = False 
+
+        if analysis_type == "cons":
+            isnontemporal = is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf)
+            if isnontemporal:
+                pf_type = 'nta'
 
 
         sorted_x = sorted(reduced_full_pc_stride_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
@@ -617,7 +662,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 #                print "%ld:ptr:1"%(pc)
             non_l1_accesses = 0
             for (sdist, count) in global_pc_sdist_hist[pc].items():
-                if sdist > 1024:
+                if sdist > float(float(conf.l1_size)/float(conf.line_size)): #1024:
                     non_l1_accesses += count
             
 
@@ -635,12 +680,12 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             continue
 
         
-        if max(global_pc_sdist_hist[pc].keys()) > (l3_size * 1024 / cache_line_size):
-            avg_mem_latency = memory_latency 
-        elif max(global_pc_sdist_hist[pc].keys()) > (l2_size * 1024 / cache_line_size) and max(global_pc_sdist_hist[pc].keys()) < (l3_size * 1024 / cache_line_size):
-            avg_mem_latency = l3_latency 
-        elif max(global_pc_sdist_hist[pc].keys()) > (l2_size * 1024 / cache_line_size) and max(global_pc_sdist_hist[pc].keys()) < (l2_size * 1024 / cache_line_size):
-            avg_mem_latency = l2_latency
+#        if max(global_pc_sdist_hist[pc].keys()) > (l3_size * 1024 / cache_line_size):
+        avg_mem_latency = memory_latency 
+#        elif max(global_pc_sdist_hist[pc].keys()) > (l2_size * 1024 / cache_line_size) and max(global_pc_sdist_hist[pc].keys()) < (l3_size * 1024 / cache_line_size):
+#            avg_mem_latency = l3_latency 
+#        elif max(global_pc_sdist_hist[pc].keys()) > (l2_size * 1024 / cache_line_size) and max(global_pc_sdist_hist[pc].keys()) < (l2_size * 1024 / cache_line_size):
+#            avg_mem_latency = l2_latency
 
         total_count = sum(global_pc_sdist_hist[pc].values())
 
@@ -666,8 +711,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) #global_pc_recur_hist[pc].values()
         recur_freq_thr = int(recur_freq[0])/6
-        recur_freq_out_loop = filter(lambda y: y < recur_freq_thr, recur_freq)
         loop_recur_freq = sum(recur_freq)
+        recur_freq_out_loop = filter(lambda y: y < recur_freq_thr, recur_freq)
         loop_reach_freq = sum(recur_freq_out_loop)
         if loop_reach_freq == 0:
             loop_reach_freq = 1
@@ -735,6 +780,14 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         print >> sys.stderr, stride, pd, sd, avg_iters
 
         print >> sys.stderr, "\n\n\n"
+                
+        print >> sys.stderr, full_pc_stride_hist[pc]
+
+        if conf.detailed_modeling == 1:
+
+            if isnontemporal and ((pd * 2) < (avg_iters / 2)):
+                sd = sd * 2
+                print >> sys.stderr, "stride doubled for non temporal access (load from DRAM)"
                 
 #        if total_count > 50:
         print"%ld:%s:%d"%(pc, pf_type, int(sd))

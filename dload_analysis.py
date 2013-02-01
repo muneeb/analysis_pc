@@ -67,12 +67,25 @@ def read_load_hit_miss_stats(conf, ref_stats_file):
             dec_pc = int(hex_pc, 16)
             miss_count = long(line_tokens[1])
             hit_count = long(line_tokens[2])
-
             pc_miss_hist[dec_pc] = miss_count
             pc_hit_hist[dec_pc] = hit_count
 
             acc_misses += miss_count
             acc_accesses += hit_count
+            acc_accesses += miss_count
+
+#        if acc_misses < (0.9 * float(total_misses)):
+#            print >> sys.stderr, "accumulated misses dont equal total misses"
+#            total_misses = acc_misses
+#            total_accesses = acc_accesses    
+
+        if acc_accesses != total_accesses:
+            acc_access_err = float(total_accesses - acc_accesses) / float(total_accesses) * 100
+            acc_miss_err = float(total_misses - acc_misses) / float(total_misses) * 100
+            print "acc err: %lf miss err: %lf" % (acc_access_err, acc_miss_err)
+            print >> sys.stderr, "accumulated misses dont equal total misses"
+            total_accesses = acc_accesses
+            total_misses = acc_misses
 
         return [pc_miss_hist, pc_hit_hist, total_misses, total_accesses]
 
@@ -106,7 +119,7 @@ def sort_leading_deinquent_loads(load_hit_miss_list):
    
     miss_ratio = round(float(total_misses)/float(total_accesses) * 100, 3)
 
-    thr_miss_ratio = float(0.9 * float(miss_ratio)) 
+    thr_miss_ratio = float(1.0 * float(miss_ratio)) 
     
     sorted_x = sorted(pc_miss_hist.iteritems(), key=operator.itemgetter(1), reverse=True)
 
@@ -114,6 +127,7 @@ def sort_leading_deinquent_loads(load_hit_miss_list):
     acc_miss_ratio = 0
     for pc, misses in sorted_x:
         pc_miss_ratio = round(float(misses)/float(total_accesses) * 100, 3)
+        pc_mr = round(float(misses)/float(misses+pc_hit_hist[pc]) * 100, 3)
         acc_miss_ratio += pc_miss_ratio
 
         if float(acc_miss_ratio > thr_miss_ratio) or pc_miss_ratio == 0:
@@ -157,7 +171,7 @@ def compute_delinq_load_identification_coverage(pc_mr_hist, delinq_load_pcs, pc_
     for pc in delinq_load_pcs:
         if pc in pc_mr_hist.keys() and pc in pc_miss_hist:
             cov_misses = cov_misses + pc_miss_hist[pc]
-
+            
     coverage = round(float(cov_misses)/float(total_misses), 5)
 
 #    coverage = round(float(cov_mr/total_mr), 5)
@@ -211,6 +225,21 @@ def compute_overall_coverage(delinq_load_pcs, pc_miss_hist, total_misses):
 
     return ov_coverage
 
+def compute_pref_to_removed_misses_ratio(delinq_load_pcs, pc_miss_hist, pc_hit_hist):
+
+    misses_removed = 0
+    pref_executed = 0
+
+    for pc in delinq_load_pcs:
+        if pc in pc_miss_hist:
+            misses_removed += pc_miss_hist[pc]
+            pref_executed += pc_miss_hist[pc]
+            pref_executed += pc_hit_hist[pc]
+
+    pref_to_misses_removed = round(float(pref_executed)/float(misses_removed), 5)
+    
+    return pref_to_misses_removed 
+
 def main():
 
     conf = Conf()
@@ -238,6 +267,8 @@ def main():
             false_positives = crf_list[2]
 
             ov_coverage = compute_overall_coverage(delinq_load_pcs, pc_miss_hist, total_misses)
+
+            pref_to_misses_removed = compute_pref_to_removed_misses_ratio(delinq_load_pcs, pc_miss_hist, pc_hit_hist)
         
         except IOError, e:
             sys.exit(1)
@@ -246,6 +277,7 @@ def main():
         print "recall: %.2lf%%"%(recall * 100)
         print "false positives: %.2lf%%"%(false_positives * 100)
         print "overall cov.: %.2lf%%"%(ov_coverage * 100)
+        print "prefetches excuted to remove 1 L1$ miss: %.2lf"%(pref_to_misses_removed)
 
     else:
         try:
