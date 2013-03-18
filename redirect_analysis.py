@@ -4,13 +4,26 @@ import string
 import sys
 import re
 import operator
+import os
+import pyusf
+import utils
+
+from uart.hist import Hist
+import uart.sample_filter as sample_filter
 
 from optparse import OptionParser
 import subprocess
+import trace_analysis
+import static_BB_cfg
 
 class Conf:
     def __init__(self):
         parser = OptionParser("usage: %prog [OPTIONS...] INFILE")
+
+        parser.add_option("-l",
+                          type="str", default=None,
+                          dest="addr_file",
+                          help="Specify the list containing addresses of delinqeunt loads")
 
         parser.add_option("-a",
                           type="str", default=None,
@@ -25,7 +38,17 @@ class Conf:
         parser.add_option("-e",
                           type="str", default=None,
                           dest="exec_file",
-                          help="Specify the executablt to inspect")
+                          help="Specify the executable to inspect")
+
+        parser.add_option("-p", "--path",
+                          type="str", default=os.curdir,
+                          dest="path",
+                          help="Specify path for burst sample files")
+
+        parser.add_option("-f", "--filter",
+                          type="str", default="all()",
+                          dest="filter",
+                          help="Filter for events to display in histogram.")
 
         (opts, args) = parser.parse_args()
 
@@ -35,6 +58,55 @@ class Conf:
         self.exec_file = opts.exec_file
 
         self.re_hex_address = re.compile("0[xX][0-9a-fA-F]+")
+
+        self.path = opts.path
+        self.line_size = 64
+        self.filter = opts.filter
+        self.addr_file = opts.addr_file
+        self.BB_reg_prefetch_dict = {}
+        self.all_delinq_loads_list = []
+        self.resolved_count = 0
+
+class CFG_Info:
+
+    def __init__(self, ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict, BB_dict):
+        self.ins_src_regs_dict = ins_src_regs_dict
+        self.ins_dst_regs_dict = ins_dst_regs_dict
+        self.ins_tags_dict = ins_tags_dict
+        self.branch_dict = branch_dict
+        self.routine_addr_range = routine_addr_range
+        self.ins_base_reg_dict = ins_base_reg_dict
+        self.ins_mem_dis_dict = ins_mem_dis_dict
+        self.ins_idx_reg_dict = ins_idx_reg_dict
+        self.ins_mem_scale_dict = ins_mem_scale_dict
+        self.BB_dict = BB_dict
+        self.vol_regs_dict = {17:"rdx", 18:"rcx", 19:"rax", 20:"r8", 21:"r9", 22:"r10", 23:"r11"}
+        self.regs_dict = {12:"rdi", 13:"rsi", 16:"rbx", 17:"rdx", 18:"rcx", 19:"rax", 20:"r8", 21:"r9", 22:"r10", 23:"r11", 24:"r12", 25:"r13", 26:"r14", 27:"r15"}
+
+def get_delinq_load_address_list(conf):
+
+    delinq_load_address_list = []
+
+    if conf.addr_file == None:
+        return
+
+    try:
+        f = open(conf.addr_file)
+        lines = f.readlines()
+        f.close()
+    except IOError, e:
+        print >> sys.stderr, "Error: %s" % str(e)
+        return None
+
+    for line in lines:
+        line_tokens = line.split(":")
+        if("ptr" in line_tokens[1]):
+            delinq_load_address_list.append(int(line_tokens[0]))
+            conf.all_delinq_loads_list.append(int(line_tokens[0]))
+
+    print "delinq addresses: %lu" % (len(delinq_load_address_list))
+
+    return delinq_load_address_list 
 
 def parse_routine_info(routine, conf):
 
@@ -50,7 +122,7 @@ def parse_routine_info(routine, conf):
     ins_idx_reg_dict = {}
     ins_mem_scale_dict = {}
 
-    tag_list = ['IndirectBranch', 'IndirectCondBranch', 'Branch', 'CondBranch', 'Call', 'Ret', 'Stack', 'Read', 'Write']
+    tag_list = ['IndirectBranch', 'IndirectCondBranch', 'Branch', 'CondBranch', 'Call', 'Ret', 'Stack', 'Read', 'Write', 'Move']
 
     line_tokens = routine.split('\n')
 
@@ -112,7 +184,9 @@ def parse_routine_info(routine, conf):
                     ins_mem_scale_dict[instr_addr] = mem_scale
 
             ins_src_regs_dict[instr_addr] =  src_regs
-            ins_dst_regs_dict[instr_addr] =  dst_regs
+
+            if len(dst_regs) > 0:
+                ins_dst_regs_dict[instr_addr] =  dst_regs
 
             ins_tag = tokens.pop()
 
@@ -139,337 +213,234 @@ def parse_routine_info(routine, conf):
 
     return [ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict]
 
-def build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range):
+def open_sample_file(file_name, line_size=64):
+    try:
+        usf_file = pyusf.Usf()
+        usf_file.open(file_name)
+    except IOError, e:
+        print >> sys.stderr, "Error: %s" % str(e)
+#        print >> sys.stderr, file_name
+        return None
 
-    BB_dict = {}
-    BB = []
+    if usf_file.header.flags & pyusf.USF_FLAG_TRACE:
+        print >> sys.stderr, "Error: Specified file is a trace."
+        return None
 
-    branch_tags = ['IndirectBranch', 'IndirectCondBranch', 'Branch', 'CondBranch', 'Ret']
+    if not usf_file.header.line_sizes & line_size:
+        print >> sys.stderr, \
+            "Eror: Specified line size does not exist in sample file."
+        return None
 
-
-    for pc in routine_addr_range:
-        BB.append(pc)
-        if pc in ins_tags_dict.keys():
-            if ins_tags_dict[pc] in branch_tags:
-                BB_start_pc = BB[0]
-                BB_dict[BB_start_pc] = BB
-                BB = []
-
-    br_target_BBs = []
-
-    for branches in branch_dict.keys():
-        br_target_list = branch_dict[branches]
-        for br_target in br_target_list:
-            if not br_target in BB_dict.keys():
-                if not br_target in br_target_BBs:
-                    br_target_BBs.append(br_target)
+    return usf_file
 
 
-    while len(br_target_BBs) > 0:
-        BB = []
-        br_target = br_target_BBs.pop()
-        
-        i = routine_addr_range.index(br_target)
+def available_vol_regs(ins_src_regs_dict):
 
-        for pc in routine_addr_range[i:len(routine_addr_range)]:
+    vol_regs_list = [23, 22, 21, 20, 19, 18, 17]
 
-            BB.append(pc)
+    for instr_addr in ins_src_regs_dict.keys():
 
-            if pc in ins_tags_dict.keys():
-                if ins_tags_dict[pc] in branch_tags:
-                    BB_start_pc = BB[0]
-                    BB_dict[BB_start_pc] = BB
-                    BB = []
+        rregs_list = ins_src_regs_dict[instr_addr]
 
-    return BB_dict
-
-def discover_BB_for_address(instr_addr, routine_BB_dict):
-
-    BBs_list = []
-
-    for BB_addr in routine_BB_dict.keys():
-        BB_addr_range = routine_BB_dict.get(BB_addr)
-        if instr_addr in BB_addr_range:
-            BB_addr_len_tup = (BB_addr, len(BB_addr_range))
-            BBs_list.append(BB_addr_len_tup)
-
-    (BB_addr, BB_len) = max(BBs_list, key=lambda x: x[1])
-
-    #return the longest BB containing the instruction
-    return BB_addr
-
-def get_entry_point_branches(BB_addr, routine_BB_dict, branch_dict):
-
-    entry_point_branches = []
-
-    for branch in branch_dict.keys():
-        
-        # if the basic block address is in the branch targets
-        if BB_addr in branch_dict[branch]:
-            entry_point_branches.append(branch)
-
-    return entry_point_branches
-        
-def check_dependencies_in_reverse(delinq_load_addr, BB_addr, ins_src_regs_dict, ins_dst_regs_dict, ins_base_reg_dict, routine_BB_dict, ins_tags_dict, branch_dict, track_reg=None):
-
-    pointer_update_dep_list = []
-
-    delinq_load_base_reg_id = ins_base_reg_dict[delinq_load_addr]
-    
-    reversed_BB_addr_range = sorted(routine_BB_dict[BB_addr], reverse=True)
-
-    if track_reg == None:
-        track_reg = delinq_load_base_reg_id
-
-    for instr_addr in reversed_BB_addr_range:
-        
-        if len(ins_dst_regs_dict[instr_addr]) > 0:
+        for reg in vol_regs_list:
             
-            reg_updated = ins_dst_regs_dict[instr_addr][0] 
-            reg_read = ins_src_regs_dict[instr_addr][0]
-            
-            tag = None
-            if instr_addr in ins_tags_dict.keys():
-                tag = ins_tags_dict[instr_addr]
+            if reg in rregs_list:
+                vol_regs_list.remove(reg)
 
-            if reg_updated == track_reg:
-                
-                # p = p->next
-                if tag == "Read":
-                    pointer_update_dep_list.append(instr_addr)
-                    track_reg = None
-                    return pointer_update_dep_list
-                
-                # move r1, r2  -- not mem op
-                elif tag != "Read":
-                    pointer_update_dep_list.append(instr_addr)
-                    track_reg = reg_read
-            
-#                else:
-#                    pointer_update_dep_list.append(instr_addr)
-#                    track_reg = reg_read
+    return vol_regs_list 
 
+
+def check_dominant_direction(update_pc_weights, cfg):
+
+    acc_freq = 0
+    base_reg_dis_dict = {}
+    pc_base_reg_dis_dict = {}
+
+    for pc_freq_tup in update_pc_weights:
+        pc = pc_freq_tup[0]
+        freq = pc_freq_tup[1]
+        
+        base_reg_id = cfg.ins_base_reg_dict[pc]
+        mem_dis = cfg.ins_mem_dis_dict[pc]
+
+        id_tup = (base_reg_id, mem_dis)
+
+        if not id_tup in base_reg_dis_dict:
+            base_reg_dis_dict[id_tup] = freq
+        else:
+            base_reg_dis_dict[id_tup] += freq
+
+        if not id_tup in pc_base_reg_dis_dict:
+            pc_base_reg_dis_dict[id_tup] = pc
+
+    for id_tup in base_reg_dis_dict.keys():
+        if base_reg_dis_dict[id_tup] >= 0.5:
+            return pc_base_reg_dis_dict[id_tup]
+
+    return None
+
+#check if a prefetch has been inserted in a BB for a given base register. If Yes, then no need to insert more prefetches
+def BB_prefetch_status(delinq_load_addr, cfg, conf):
+
+    BB_addr = static_BB_cfg.discover_BB_for_address(delinq_load_addr, cfg.BB_dict)
+    base_reg_id = cfg.ins_base_reg_dict[delinq_load_addr]
     
-    if track_reg != None:
-        entry_point_branches = get_entry_point_branches(BB_addr, routine_BB_dict, branch_dict)
-
-        for entry_point_branch in entry_point_branches:
-            preceding_BB_addr = discover_BB_for_address(entry_point_branch, routine_BB_dict)
-
-            branched_dep_list = check_dependencies_in_reverse(delinq_load_addr, preceding_BB_addr, ins_src_regs_dict, ins_dst_regs_dict, ins_base_reg_dict, routine_BB_dict, ins_tags_dict, branch_dict, track_reg)
-            pointer_update_dep_list.append(branched_dep_list)
-
-    return pointer_update_dep_list
-
-
-def discover_pointer_chasing(routine_BB_dict, ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, delinq_load_addr, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict):
-    
-    print delinq_load_addr
-
-    pointer_update_ins_list = []
-
-    if delinq_load_addr in ins_tags_dict.keys():
-        ins_tag = ins_tags_dict.get(delinq_load_addr)
-
-        if ins_tag == "Read":
-            None
-    
-    if not delinq_load_addr in ins_base_reg_dict.keys():
-        return
-
-    BB_addr = discover_BB_for_address(delinq_load_addr, routine_BB_dict)
-
-    entry_point_branches = get_entry_point_branches(BB_addr, routine_BB_dict, branch_dict)
-
-    for entry_point_branch in entry_point_branches:
-        preceding_BB_addr = discover_BB_for_address(entry_point_branch, routine_BB_dict)
-
-        pointer_update_dep_list = check_dependencies_in_reverse(delinq_load_addr, preceding_BB_addr, ins_src_regs_dict, ins_dst_regs_dict, ins_base_reg_dict, routine_BB_dict, ins_tags_dict, branch_dict)
-
-        if len(pointer_update_dep_list) > 0:
-            print "dep list"
-            print pointer_update_dep_list
-
-    delinq_load_base_reg_id = ins_base_reg_dict[delinq_load_addr]
-    if len(ins_dst_regs_dict[delinq_load_addr]) > 0:
-        reg_updated_at_delinq_load = ins_dst_regs_dict[delinq_load_addr][0]
+    if BB_addr in conf.BB_reg_prefetch_dict:
+        if base_reg_id in conf.BB_reg_prefetch_dict[BB_addr]:
+            print ">>> WARNING: pc(%lx) Prefetch already present in BB @%lx for base register %s at pc %lx" % (delinq_load_addr, BB_addr, cfg.regs_dict[base_reg_id], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
+            return False
+        else:
+            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = delinq_load_addr
     else:
-        reg_updated_at_delinq_load = None
-        
-    if delinq_load_base_reg_id == reg_updated_at_delinq_load:
-        print "self update instruction p = p->next @ %x"%(delinq_load_addr)
-        pointer_update_ins_list.append(delinq_load_addr)
+        conf.BB_reg_prefetch_dict[BB_addr] = {}
+        conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = delinq_load_addr
+
+    return True
+
+def is_reschedulable(delinq_load_addr, update_addr, cfg):
+
+    base_reg_id_delinq_load = cfg.ins_base_reg_dict[delinq_load_addr]
+    base_reg_id_update_instr = cfg.ins_base_reg_dict[update_addr]
+
+    if base_reg_id_delinq_load == base_reg_id_update_instr:
+        return True
+    
+    return False
+
+def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, cfg, conf):
+
+    if not pointer_update_addr_dict:
         return
 
-    BBs_to_check = []
+    conf.resolved_count += 1
 
-    BBs_to_check.append(BB_addr)
+    if not BB_prefetch_status(delinq_load_addr, cfg, conf):
+        return
 
-    checked_BBs = []
+#    if delinq_load_addr in pointer_update_time_dict:
+#        if pointer_update_time_dict[delinq_load_addr] < 7:
+#            print >> sys.stderr, "pointer updated too soon at pc %lx, time %lu" % (delinq_load_addr, pointer_update_time_dict[delinq_load_addr])
+#            print >> sys.stderr, "\n"
+#        else:
+#            print >> sys.stderr, "pc %lx, time to use %lu" % (delinq_load_addr, pointer_update_time_dict[delinq_load_addr])
+#            return
+
+    available_vol_regs_list = available_vol_regs(cfg.ins_src_regs_dict)
+
+    if not available_vol_regs_list:
+        usable_regs_list = static_BB_cfg.check_usable_regs_from_next_BBs(delinq_load_addr, cfg)
+
+        if not usable_regs_list:
+            print >> sys.stderr, ">>>No usable regs found"
+        else:
+            usable_regs_list = filter(lambda x: x in cfg.regs_dict.keys(), usable_regs_list)
+            print usable_regs_list
+            if not usable_regs_list:
+                print ">>>No usable regs found"
+            available_vol_regs_list = usable_regs_list
+
+    pf_type = "ptr"
+
+    total_weight = sum(pointer_update_addr_dict.values())
+
+    update_pc_weights = map(lambda tup: tuple([tup[0], round(float(tup[1])/float(total_weight), 2)]), pointer_update_addr_dict.items())
+
+    update_pc_weights = sorted(update_pc_weights, key=operator.itemgetter(1), reverse=True)
+
+    freq_update_pc_weight = update_pc_weights[0]
+
+    total_time_weight = sum(pointer_update_time_dict[delinq_load_addr].values())
     
-    reg_update_ins = []
-    updated_reg_read_ins = []
+    update_pc_time_weights = map(lambda tup: tuple([tup[0], round(float(tup[1])/float(total_time_weight), 2)]), pointer_update_time_dict[delinq_load_addr].items())
 
-    src_regs_at_update_ins = []
+    update_pc_time_weights = sorted(update_pc_time_weights, key=operator.itemgetter(1), reverse=True)
 
-    while len(BBs_to_check) > 0:
+    time_to_update = time_to_update_dict[delinq_load_addr].items()
 
-        curr_BB = BBs_to_check.pop()
+    time_to_update = sorted(time_to_update, key=operator.itemgetter(1), reverse=True)
 
-        BB_addr_range = routine_BB_dict.get(curr_BB)
+    freq_delinq_loads_till_update = freq_delinq_loads_till_use = 0
 
-        for instr_addr in BB_addr_range:
-            if instr_addr == delinq_load_addr:
-                continue
+    if delinq_loads_till_update:
 
-            if len(ins_dst_regs_dict[instr_addr]) > 0:
-                reg_updated = ins_dst_regs_dict[instr_addr][0]
-                
-                if delinq_load_base_reg_id == reg_updated:
-                    if not instr_addr in reg_update_ins:
-                        reg_update_ins.append(instr_addr)
-                    
-                    reg_read = ins_src_regs_dict[instr_addr][0]
-                    if not reg_read in src_regs_at_update_ins:
-                        src_regs_at_update_ins.append(reg_read)
-                    
-            if len(ins_src_regs_dict[instr_addr]) > 0:
-                reg_read = ins_src_regs_dict[instr_addr][0]
-                
-                if  reg_updated_at_delinq_load == reg_read:
-                    if not instr_addr in updated_reg_read_ins:
-                        updated_reg_read_ins.append(instr_addr)
-
-        checked_BBs.append(curr_BB)
-
-        if instr_addr in branch_dict.keys():
-            curr_BB_exit_targets_list = branch_dict[instr_addr]
-            for br_target in curr_BB_exit_targets_list:
-                if br_target in checked_BBs:
-                    continue
-                else:
-                    BBs_to_check.append(br_target)
-
-    print "base reg at %x updated at"%(delinq_load_addr)
-    print reg_update_ins
-
-    print "reg updated at %x read at"%(delinq_load_addr)
-    print updated_reg_read_ins
-
-    print "src regs"
-    print src_regs_at_update_ins
-
-    BB_addr = discover_BB_for_address(delinq_load_addr, routine_BB_dict)
-
-    BBs_to_check = []
-
-    BBs_to_check.append(BB_addr)
-
-    checked_BBs = []
-    
-    updated_reg_updated_ins = []
-
-
-    while len(BBs_to_check) > 0:
-
-        curr_BB = BBs_to_check.pop()
-                
-        BB_addr_range = routine_BB_dict.get(curr_BB)
-                
-        for instr_addr in BB_addr_range:
-            if instr_addr == delinq_load_addr:
-                continue
-
-            reg_updated = reg_read = None
-
-            if len(ins_dst_regs_dict[instr_addr]) > 0:
-                reg_updated = ins_dst_regs_dict[instr_addr][0]
-
-            if len(ins_src_regs_dict[instr_addr]) > 0:
-                reg_read = ins_src_regs_dict[instr_addr][0]
-                
-            if reg_updated_at_delinq_load == reg_updated:
-                if not instr_addr in updated_reg_updated_ins:
-                    updated_reg_updated_ins.append(instr_addr)
-            elif delinq_load_base_reg_id == reg_updated and reg_read == reg_updated_at_delinq_load: # p = p->next
-                if reg_read in src_regs_at_update_ins:
-                    src_regs_at_update_ins.remove(reg_read)
-                if not instr_addr in updated_reg_updated_ins and not instr_addr in pointer_update_ins_list:
-                    pointer_update_ins_list.append(instr_addr)
-
-            checked_BBs.append(curr_BB)
-                                
-            if instr_addr in branch_dict.keys():
-                curr_BB_exit_targets_list = branch_dict[instr_addr]
-                for br_target in curr_BB_exit_targets_list:
-                    if br_target in checked_BBs:
-                        continue
-                    else:
-                        BBs_to_check.append(br_target)
-
-    
-    print "src regs"
-    print src_regs_at_update_ins
-
-    last_update_ins_reg_to_check = {}
-
-    for src_reg_to_check in src_regs_at_update_ins:
-   
-        BB_addr = discover_BB_for_address(delinq_load_addr, routine_BB_dict)
-     
-        BBs_to_check = []
-
-        BBs_to_check.append(BB_addr)
+        delinq_loads_till_update_freq_list = sorted(delinq_loads_till_update.items(), key=operator.itemgetter(1), reverse=True)
         
-        checked_BBs = []
-
-        while len(BBs_to_check) > 0:
-
-            curr_BB = BBs_to_check.pop()
-                
-            BB_addr_range = routine_BB_dict.get(curr_BB)
-                
-            for instr_addr in BB_addr_range:
-
-                reg_updated = reg_read = None
-
-                if len(ins_dst_regs_dict[instr_addr]) > 0:
-                    reg_updated = ins_dst_regs_dict[instr_addr][0]
-
-                if len(ins_src_regs_dict[instr_addr]) > 0:
-                    reg_read = ins_src_regs_dict[instr_addr][0]
-                
-                if src_reg_to_check == reg_updated:
-                    if not reg_updated in last_update_ins_reg_to_check.keys():
-                        last_update_ins_reg_to_check[reg_updated] = [instr_addr]
-                    elif not instr_addr in last_update_ins_reg_to_check[reg_updated]:
-                        last_update_ins_reg_to_check[reg_updated].append(instr_addr)
-
-
-                checked_BBs.append(curr_BB)
-                                
-                if instr_addr in branch_dict.keys():
-                    curr_BB_exit_targets_list = branch_dict[instr_addr]
-                    for br_target in curr_BB_exit_targets_list:
-                        if br_target in checked_BBs:
-                            continue
-                        else:
-                            BBs_to_check.append(br_target)
-
-
-    print "\n\n"
-    print "p = p->next @"
-    print pointer_update_ins_list
-
-    print "src register updates @"
-    print last_update_ins_reg_to_check
-
-    print "\n\n"
-    print branch_dict
-    print "\n\n"
-    print routine_BB_dict
-
+        freq_delinq_loads_till_update = delinq_loads_till_update_freq_list[0][0]
         
+    if delinq_loads_till_use:
+        
+        delinq_loads_till_use_freq_list = sorted(delinq_loads_till_use.items(), key=operator.itemgetter(1), reverse=True)
+        
+        freq_delinq_loads_till_use = delinq_loads_till_use_freq_list[0][0]
+
+    print time_to_update
+
+    if freq_update_pc_weight[1] < 0.5:
+        freq_update_pc = check_dominant_direction(update_pc_weights, cfg)        
+
+        if freq_update_pc is None:
+            print >> sys.stderr, ">>>pointer chasing occuring frequently in many directions at pc:%lx" % (delinq_load_addr)
+            print >> sys.stderr, update_pc_weights
+            print >> sys.stderr, "\n"
+            return
+
+    freq_update_pc = freq_update_pc_weight[0]
+
+    print freq_update_pc_weight
+
+    clobber_reg = "None"
+    if available_vol_regs_list:
+        for reg in available_vol_regs_list:
+            if reg in cfg.regs_dict:
+                clobber_reg = cfg.regs_dict[reg]
+                break
+
+    if freq_update_pc in cfg.ins_tags_dict.keys():
+        if (cfg.ins_tags_dict[freq_update_pc] == "Read" or cfg.ins_tags_dict[freq_update_pc] == "Write") and freq_update_pc in cfg.ins_base_reg_dict.keys():
+        
+            mem_dis = cfg.ins_mem_dis_dict[freq_update_pc]
+
+            base_reg_id = cfg.ins_base_reg_dict[freq_update_pc]
+        
+            updated_reg_id = cfg.ins_dst_regs_dict[freq_update_pc][0]
+
+            if base_reg_id == 0:
+                pf_type = "ind"
+                print"%d>>> %lx no base_reg id <<<"%(conf.resolved_count, freq_update_pc)
+                return
+                
+            base_reg = cfg.regs_dict[base_reg_id]
+            updated_reg = cfg.regs_dict[updated_reg_id]
+
+            score = update_pc_time_weights[0][0]
+            fwd_score = time_to_update[0][0]
+
+            reschedule =  is_reschedulable(delinq_load_addr, freq_update_pc, cfg)
+
+            if clobber_reg != "None" and reschedule and delinq_load_addr != freq_update_pc:
+                schedule_addr = delinq_load_addr
+
+                reschedule_addr = static_BB_cfg.is_mem_loc_accessed_in_BB(base_reg_id, mem_dis, delinq_load_addr, cfg)
+                if not reschedule_addr == None:
+                    if reschedule_addr > schedule_addr:
+                        schedule_addr = reschedule_addr
+                        clobber_reg = "None"
+            else:
+                schedule_addr = freq_update_pc
+                mem_dis = cfg.ins_mem_dis_dict[delinq_load_addr]
+                clobber_reg = "None"
+                if not reschedule:
+                    print ">>> nested object"
+
+            print"%d>>>%lx:%d:%d"%(conf.resolved_count, delinq_load_addr, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
+            print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score)
+            
+
+#    else:
+#        dst_reg_id = cfg.ins_dst_regs_dict[freq_update_pc][0]
+#        dst_reg = cfg.regs_dict[dst_reg_id]
+#        print"%d>>> %ld:%s:%s:%s:%s <<<"%(conf.resolved_count, freq_update_pc, pf_type, "None", dst_reg, "None")
+
 
 def main():
 
@@ -485,18 +456,72 @@ def main():
     ins_idx_reg_dict = {}
     ins_mem_scale_dict = {}
 
+    global_prefetchable_pcs = []
+
+    global_pc_smptrace_hist = {}
+
     conf = Conf()
 
     delinq_load_addr = int(conf.dec_address, 10)
+
+    delinq_load_address_list = get_delinq_load_address_list(conf)
+
+    if delinq_load_address_list == None:
+        delinq_load_address_list = [delinq_load_addr]
+
+    listing = os.listdir(conf.path)
+
+    print "building trace maps..."
+
+    for infile in listing:
+
+        infile = conf.path + infile
+
+        usf_file = open_sample_file(infile, conf.line_size)
+        
+        if usf_file == None:
+
+            continue
+
+        try:
+            burst_hists = utils.usf_read_events(usf_file,
+                                                line_size=conf.line_size,
+                                                filter=conf.filter)
+
+        except IOError, e:
+            continue
+
+        usf_file.close()
+
+        for (pc_rdist_hist, pc_stride_hist, pc_freq_hist, pc_time_hist, pc_corr_hist, pc_fwd_rdist_hist, pc_smptrace_hist) in burst_hists:
+            continue
+
+        trace_analysis.add_trace_to_global_pc_smptrace_hist(global_pc_smptrace_hist, pc_smptrace_hist)
+
+    print "Starting trace analysis..."
+
+    for delinq_load_addr in delinq_load_address_list:
+
+        print "--%lu--" % (delinq_load_addr)
+
+        routine = subprocess.Popen(["/home/muneeb/pin-2.8-36111-gcc.3.4.6-ia32_intel64-linux/source/tools/ManualExamples/obj-intel64/get_routine", "-a", str(delinq_load_addr),"-i", conf.exec_file], stdout=subprocess.PIPE).communicate()[0]
+
+        [ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict] = parse_routine_info(routine, conf)
+
+        BB_dict = static_BB_cfg.build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range)
     
-    routine = subprocess.Popen(["/home/muneeb/pin-2.8-36111-gcc.3.4.6-ia32_intel64-linux/source/tools/ManualExamples/obj-intel64/get_routine", "-a", conf.dec_address,"-i", conf.exec_file], stdout=subprocess.PIPE).communicate()[0]
+        cfg = CFG_Info(ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict, BB_dict)
 
-    [ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict] = parse_routine_info(routine, conf)
+   #     pointer_update_instr_list = static_BB_cfg.discover_pointer_chasing_static(cfg, delinq_load_addr)
+        
+        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use) = trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, cfg, conf)
 
-    routine_BB_dict = build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range)
+        print pointer_update_addr_dict.items()
 
-    discover_pointer_chasing(routine_BB_dict, ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, delinq_load_addr, 
-                             ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict)
+        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, cfg, conf)
+        
+        print "\n\n"
+
 
 if __name__ == "__main__":
     main()
