@@ -16,6 +16,22 @@ import subprocess
 import trace_analysis
 import static_BB_cfg
 
+class PrefParams:
+
+    def __init__(self, schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score):
+        
+        self.schedule_addr = schedule_addr
+        self.pf_type = pf_type
+        self.clobber_reg = clobber_reg
+        self.base_reg = base_reg
+        self.mem_dis = mem_dis
+        self.freq_update_pc = freq_update_pc
+        self.updated_reg = updated_reg
+        self.score = score
+        self.fwd_score = fwd_score
+        
+        
+
 class Conf:
     def __init__(self):
         parser = OptionParser("usage: %prog [OPTIONS...] INFILE")
@@ -64,6 +80,7 @@ class Conf:
         self.filter = opts.filter
         self.addr_file = opts.addr_file
         self.BB_reg_prefetch_dict = {}
+        self.prefetch_decisions = {}
         self.all_delinq_loads_list = []
         self.resolved_count = 0
 
@@ -106,6 +123,8 @@ def get_delinq_load_address_list(conf):
 
     print "delinq addresses: %lu" % (len(delinq_load_address_list))
 
+    delinq_load_address_list = sorted(delinq_load_address_list)
+
     return delinq_load_address_list 
 
 def parse_routine_info(routine, conf):
@@ -122,12 +141,14 @@ def parse_routine_info(routine, conf):
     ins_idx_reg_dict = {}
     ins_mem_scale_dict = {}
 
-    tag_list = ['IndirectBranch', 'IndirectCondBranch', 'Branch', 'CondBranch', 'Call', 'Ret', 'Stack', 'Read', 'Write', 'Move']
+    tag_list = ['IndirectBranch', 'IndirectCondBranch', 'Branch', 'CondBranch', 'Call', 'Ret', 'Stack', 'Read', 'Write', 'Move', 'Nop']
 
     line_tokens = routine.split('\n')
 
     target_address = 0
     tag_br_target_for_this_pc = 0
+
+    is_nop = False
 
     for line in line_tokens:
 
@@ -141,6 +162,10 @@ def parse_routine_info(routine, conf):
             if tag_br_target_for_this_pc != 0:
                 branch_dict[tag_br_target_for_this_pc].append(instr_addr)
                 tag_br_target_for_this_pc = 0
+
+            instr = tokens[2]
+            if "nop" in instr:
+                is_nop = True
 
             print line
 
@@ -182,6 +207,13 @@ def parse_routine_info(routine, conf):
                     reg_info_tokens = reg_info.split(":")
                     mem_scale = int(reg_info_tokens[1], 16)
                     ins_mem_scale_dict[instr_addr] = mem_scale
+
+            if is_nop:
+                is_nop = False
+                ins_tag = "Nop"
+                ins_tags_dict[instr_addr] = ins_tag
+                print line+"  "+ins_tag
+                continue
 
             ins_src_regs_dict[instr_addr] =  src_regs
 
@@ -234,17 +266,20 @@ def open_sample_file(file_name, line_size=64):
     return usf_file
 
 
-def available_vol_regs(ins_src_regs_dict):
+def available_vol_regs(ins_src_regs_dict, ins_dst_regs_dict):
 
     vol_regs_list = [23, 22, 21, 20, 19, 18, 17]
 
     for instr_addr in ins_src_regs_dict.keys():
 
         rregs_list = ins_src_regs_dict[instr_addr]
+        
+        if instr_addr in ins_dst_regs_dict:
+            rregs_list += ins_dst_regs_dict[instr_addr]
 
-        for reg in vol_regs_list:
+        for reg in rregs_list:
             
-            if reg in rregs_list:
+            if reg in vol_regs_list:
                 vol_regs_list.remove(reg)
 
     return vol_regs_list 
@@ -280,23 +315,48 @@ def check_dominant_direction(update_pc_weights, cfg):
     return None
 
 #check if a prefetch has been inserted in a BB for a given base register. If Yes, then no need to insert more prefetches
-def BB_prefetch_status(delinq_load_addr, cfg, conf):
+def add_to_BB_prefetch_decisions(delinq_load_addr, cfg, conf):
 
     BB_addr = static_BB_cfg.discover_BB_for_address(delinq_load_addr, cfg.BB_dict)
     base_reg_id = cfg.ins_base_reg_dict[delinq_load_addr]
-    
+    mem_dis = cfg.ins_mem_dis_dict[delinq_load_addr]
+
     if BB_addr in conf.BB_reg_prefetch_dict:
         if base_reg_id in conf.BB_reg_prefetch_dict[BB_addr]:
-            print ">>> WARNING: pc(%lx) Prefetch already present in BB @%lx for base register %s at pc %lx" % (delinq_load_addr, BB_addr, cfg.regs_dict[base_reg_id], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
-            return False
+            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] += [(delinq_load_addr, mem_dis)]
         else:
-            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = delinq_load_addr
+            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = [(delinq_load_addr, mem_dis)]
     else:
         conf.BB_reg_prefetch_dict[BB_addr] = {}
-        conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = delinq_load_addr
+        conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = [(delinq_load_addr, mem_dis)]
 
-    return True
 
+def BB_prefetch_status(delinq_load_addr, cfg, conf):
+
+    pf_type = "ptr"
+
+    BB_addr = static_BB_cfg.discover_BB_for_address(delinq_load_addr, cfg.BB_dict)
+    base_reg_id = cfg.ins_base_reg_dict[delinq_load_addr]
+
+    if BB_addr in conf.BB_reg_prefetch_dict:
+        if base_reg_id in conf.BB_reg_prefetch_dict[BB_addr]:
+
+            mem_dis_list = map(lambda x: x[1], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
+
+            mem_dis = cfg.ins_mem_dis_dict[delinq_load_addr]
+            max_dis = max(mem_dis_list)
+            mem_dis_diff = max_dis - mem_dis
+
+            if mem_dis_diff == 0:
+                return pf_type
+            elif mem_dis_diff < conf.line_size:
+                pf_type = "ptradj"
+            else:
+                pf_type = "ptradj2"
+
+    return pf_type
+
+#checks for nested objects - Not schedulable if "nested object"
 def is_reschedulable(delinq_load_addr, update_addr, cfg):
 
     base_reg_id_delinq_load = cfg.ins_base_reg_dict[delinq_load_addr]
@@ -307,39 +367,63 @@ def is_reschedulable(delinq_load_addr, update_addr, cfg):
     
     return False
 
-def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, cfg, conf):
+def decide_prefetch_schedules(cfg, conf):
+
+    BB_addr_list = sorted(conf.BB_reg_prefetch_dict.keys())
+
+    for BB_addr in BB_addr_list:
+        for base_reg_id in conf.BB_reg_prefetch_dict[BB_addr].keys():
+
+#            print ">>>>>>"+str(conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
+
+            addr_list = map(lambda x: x[0], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
+            mem_dis_list = map(lambda x: x[1], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
+            max_dis = max(mem_dis_list)
+            min_dis = min(mem_dis_list)
+
+#            print ">>>>>>"+str(addr_list)
+
+            mem_dis_diff = max_dis - min_dis
+
+            if mem_dis_diff == 0:
+                pf_type = "ptr"
+            elif mem_dis_diff < conf.line_size:
+                pf_type = "ptradj"
+            else:
+                pf_type = "ptradj2"
+
+            #schedule earliest
+            schedule_addr = min(addr_list)
+
+            conf.prefetch_decisions[schedule_addr].pf_type = pf_type
+            
+            for addr in addr_list:
+                if addr == schedule_addr:
+                    continue
+                del conf.prefetch_decisions[addr]
+
+            print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<"%(conf.prefetch_decisions[schedule_addr].schedule_addr, 
+                                                     conf.prefetch_decisions[schedule_addr].pf_type, 
+                                                     conf.prefetch_decisions[schedule_addr].clobber_reg, 
+                                                     conf.prefetch_decisions[schedule_addr].base_reg, 
+                                                     conf.prefetch_decisions[schedule_addr].mem_dis, 
+                                                     conf.prefetch_decisions[schedule_addr].freq_update_pc, 
+                                                     conf.prefetch_decisions[schedule_addr].updated_reg, 
+                                                     conf.prefetch_decisions[schedule_addr].score, 
+                                                     conf.prefetch_decisions[schedule_addr].fwd_score)
+            print ">>>grouped>>>"+str(addr_list)
+
+def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf):
 
     if not pointer_update_addr_dict:
         return
 
     conf.resolved_count += 1
 
-    if not BB_prefetch_status(delinq_load_addr, cfg, conf):
-        return
+    pf_type = BB_prefetch_status(delinq_load_addr, cfg, conf)
 
-#    if delinq_load_addr in pointer_update_time_dict:
-#        if pointer_update_time_dict[delinq_load_addr] < 7:
-#            print >> sys.stderr, "pointer updated too soon at pc %lx, time %lu" % (delinq_load_addr, pointer_update_time_dict[delinq_load_addr])
-#            print >> sys.stderr, "\n"
-#        else:
-#            print >> sys.stderr, "pc %lx, time to use %lu" % (delinq_load_addr, pointer_update_time_dict[delinq_load_addr])
-#            return
 
-    available_vol_regs_list = available_vol_regs(cfg.ins_src_regs_dict)
-
-    if not available_vol_regs_list:
-        usable_regs_list = static_BB_cfg.check_usable_regs_from_next_BBs(delinq_load_addr, cfg)
-
-        if not usable_regs_list:
-            print >> sys.stderr, ">>>No usable regs found"
-        else:
-            usable_regs_list = filter(lambda x: x in cfg.regs_dict.keys(), usable_regs_list)
-            print usable_regs_list
-            if not usable_regs_list:
-                print ">>>No usable regs found"
-            available_vol_regs_list = usable_regs_list
-
-    pf_type = "ptr"
+    available_vol_regs_list = available_vol_regs(cfg.ins_src_regs_dict, cfg.ins_dst_regs_dict)
 
     total_weight = sum(pointer_update_addr_dict.values())
 
@@ -373,8 +457,6 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
         
         freq_delinq_loads_till_use = delinq_loads_till_use_freq_list[0][0]
 
-    print time_to_update
-
     if freq_update_pc_weight[1] < 0.5:
         freq_update_pc = check_dominant_direction(update_pc_weights, cfg)        
 
@@ -385,15 +467,6 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
             return
 
     freq_update_pc = freq_update_pc_weight[0]
-
-    print freq_update_pc_weight
-
-    clobber_reg = "None"
-    if available_vol_regs_list:
-        for reg in available_vol_regs_list:
-            if reg in cfg.regs_dict:
-                clobber_reg = cfg.regs_dict[reg]
-                break
 
     if freq_update_pc in cfg.ins_tags_dict.keys():
         if (cfg.ins_tags_dict[freq_update_pc] == "Read" or cfg.ins_tags_dict[freq_update_pc] == "Write") and freq_update_pc in cfg.ins_base_reg_dict.keys():
@@ -408,6 +481,8 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                 pf_type = "ind"
                 print"%d>>> %lx no base_reg id <<<"%(conf.resolved_count, freq_update_pc)
                 return
+
+            add_to_BB_prefetch_decisions(delinq_load_addr, cfg, conf)
                 
             base_reg = cfg.regs_dict[base_reg_id]
             updated_reg = cfg.regs_dict[updated_reg_id]
@@ -417,12 +492,35 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
 
             reschedule =  is_reschedulable(delinq_load_addr, freq_update_pc, cfg)
 
-            if clobber_reg != "None" and reschedule and delinq_load_addr != freq_update_pc:
-                schedule_addr = delinq_load_addr
+            if not available_vol_regs_list:
+                if reschedule and delinq_load_addr != freq_update_pc:
+                    schedule_addr = delinq_load_addr
+                else:
+                    schedule_addr = freq_update_pc
+                    
+                usable_regs_list = static_BB_cfg.check_usable_regs_from_next_BBs(schedule_addr, cfg)
 
+                if not usable_regs_list:
+                    print >> sys.stderr, ">>>No usable regs found"
+                else:
+                    available_vol_regs_list = usable_regs_list
+
+            clobber_reg = "None"
+            if available_vol_regs_list:
+                for reg in available_vol_regs_list:
+                    if reg in cfg.regs_dict:
+                        clobber_reg = cfg.regs_dict[reg]
+                        break
+    
+            print "%%%"
+            print clobber_reg
+
+            if clobber_reg != "None" and reschedule and delinq_load_addr != freq_update_pc:
+                
+                schedule_addr = delinq_load_addr
                 reschedule_addr = static_BB_cfg.is_mem_loc_accessed_in_BB(base_reg_id, mem_dis, delinq_load_addr, cfg)
                 if not reschedule_addr == None:
-                    if reschedule_addr > schedule_addr:
+                    if reschedule_addr < schedule_addr:
                         schedule_addr = reschedule_addr
                         clobber_reg = "None"
             else:
@@ -435,6 +533,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
             print"%d>>>%lx:%d:%d"%(conf.resolved_count, delinq_load_addr, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
             print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score)
             
+            conf.prefetch_decisions[delinq_load_addr] = PrefParams(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score)
 
 #    else:
 #        dst_reg_id = cfg.ins_dst_regs_dict[freq_update_pc][0]
@@ -514,14 +613,15 @@ def main():
 
    #     pointer_update_instr_list = static_BB_cfg.discover_pointer_chasing_static(cfg, delinq_load_addr)
         
-        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use) = trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, cfg, conf)
+        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop) = trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, cfg, conf)
 
         print pointer_update_addr_dict.items()
 
-        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, cfg, conf)
+        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf)
         
         print "\n\n"
-
+        
+    decide_prefetch_schedules(cfg, conf)
 
 if __name__ == "__main__":
     main()
