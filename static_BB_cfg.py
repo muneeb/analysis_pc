@@ -145,8 +145,6 @@ def check_usable_regs_in_BBs_in_loop(all_BBs_in_loop, cfg):
 
 def check_usable_regs_from_next_BBs(instr_addr, cfg):
 
-    next_BBs_list = get_next_BBs(instr_addr, cfg.BB_dict, cfg.branch_dict)
-
     BB_addr = discover_BB_for_address(instr_addr, cfg.BB_dict)
 
     reversed_BB_addr_range = sorted(cfg.BB_dict[BB_addr], reverse=True)
@@ -154,11 +152,10 @@ def check_usable_regs_from_next_BBs(instr_addr, cfg):
 
     curr_BB_usable_regs = []
     usable_regs = []
-    unusable_regs = []
 
     for pc_in_BB in reversed_BB_addr_range:
-        if pc_in_BB in cfg.ins_tags_dict and cfg.ins_tags_dict[pc_in_BB] == "Nop":
-            continue
+
+        unusable_regs = []
 
         if pc_in_BB in cfg.ins_dst_regs_dict:
             reg_written = cfg.ins_dst_regs_dict[pc_in_BB][0]
@@ -168,17 +165,21 @@ def check_usable_regs_from_next_BBs(instr_addr, cfg):
 
         for reg in curr_BB_usable_regs:
             if reg in cfg.ins_src_regs_dict[pc_in_BB]:
-                curr_BB_usable_regs.remove(reg)
+#                curr_BB_usable_regs.remove(reg)
                 if reg not in unusable_regs:
                     unusable_regs.append(reg)
 
+        curr_BB_usable_regs = filter(lambda x: x not in unusable_regs, curr_BB_usable_regs)
+        
     curr_BB_usable_regs = filter(lambda x: x in cfg.regs_dict.keys(), curr_BB_usable_regs)
+
 
     if curr_BB_usable_regs:
         return curr_BB_usable_regs
 
     ###############################################################
 
+    next_BBs_list = get_next_BBs(instr_addr, cfg.BB_dict, cfg.branch_dict)
 
     #registers that are written but not read before that
     usable_regs = []

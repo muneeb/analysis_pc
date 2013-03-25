@@ -42,7 +42,7 @@ def update_pc_weight_hist(pc_mem_dis_weights_dict, pc, base_reg, dis):
 #def detect_BBs_in_loop():
 
 
-def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, conf):
+def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, delinq_loads_update_addr, prefetch_decisions, conf):
 
     if not delinq_load_addr in trace_q:
         return
@@ -60,6 +60,8 @@ def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_u
 
     pc_in_BB = None
 
+#    update_addr_list = delinq_loads_update_addr[delinq_load_addr]
+
     while trace_q:
 
         if not BB_addr in BBs_in_loop:
@@ -67,7 +69,7 @@ def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_u
 
         for pc_in_BB in reversed_BB_addr_range:
 
-            if pc_in_BB == update_addr:
+            if pc_in_BB == delinq_load_addr:# update_addr_list:
                 break
 
 #            if trace_q and pc_in_BB == trace_q[0]:
@@ -75,11 +77,17 @@ def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_u
 
             if pc_in_BB in cfg.ins_tags_dict:
                 if pc_in_BB in conf.all_delinq_loads_list:
-                    fwd_delinq_loads += 1
+                    if prefetch_decisions[pc_in_BB].l3_mr >= 0.01:
+                        fwd_delinq_loads += 1
+                    elif prefetch_decisions[pc_in_BB].l2_mr >= 0.05:
+                        fwd_delinq_loads += 1
+                    elif prefetch_decisions[pc_in_BB].l1_mr >= 0.3:
+                        fwd_delinq_loads += 1
+
                     
             fwd_score += 1
         
-        if pc_in_BB == update_addr:
+        if pc_in_BB == delinq_load_addr: #update_addr:
             break
             
         while pc_in_trace in reversed_BB_addr_range:
@@ -115,9 +123,16 @@ def record_update_time(delinq_load_addr, score, pointer_update_time_dict, delinq
     else:
         delinq_loads_dict[delinq_loads_count] = 1
 
+def record_update_addr(delinq_load_addr, update_addr, delinq_loads_update_addr):
+    
+    if delinq_load_addr in delinq_loads_update_addr:
+        if not update_addr in delinq_loads_update_addr[delinq_load_addr]:
+            delinq_loads_update_addr[delinq_load_addr].append(update_addr)
+    else:
+        delinq_loads_update_addr[delinq_load_addr] = [update_addr]
 
 #returns (track_reg)
-def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trace_q, cfg, pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, conf):
+def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trace_q, cfg, pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, delinq_loads_update_addr, prefetch_decisions, conf):
 
 #    print BB_addr, BBs_inspected, pointer_update_addr_list
 
@@ -148,7 +163,12 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
             if pc_in_BB in cfg.ins_tags_dict:
                 tag = cfg.ins_tags_dict[pc_in_BB]
                 if pc_in_BB in conf.all_delinq_loads_list:
-                    inter_delinq_loads += 1
+                    if prefetch_decisions[pc_in_BB].l3_mr >= 0.01:
+                        inter_delinq_loads += 1
+                    elif prefetch_decisions[pc_in_BB].l2_mr >= 0.05:
+                        inter_delinq_loads += 1
+                    elif prefetch_decisions[pc_in_BB].l1_mr >= 0.3:
+                        inter_delinq_loads += 1
 
             score += 1
 
@@ -172,7 +192,8 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
                     #should not include the pointer update instruction, its latency should not be counted
                     score -= 1
                     record_update_time(delinq_load_addr, score, pointer_update_time_dict, inter_delinq_loads, delinq_loads_till_use)
-                    record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, conf)
+                    record_update_addr(delinq_load_addr, pc_in_BB, delinq_loads_update_addr)
+                    record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, delinq_loads_update_addr, prefetch_decisions, conf)
                     return BBs_in_loop
 #                        return track_reg
                 
@@ -190,7 +211,8 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
                     track_reg = None
                     score -= 1
                     record_update_time(delinq_load_addr, score, pointer_update_time_dict, inter_delinq_loads, delinq_loads_till_use)
-                    record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, conf)
+                    record_update_addr(delinq_load_addr, pc_in_BB, delinq_loads_update_addr)
+                    record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, delinq_loads_update_addr, prefetch_decisions, conf)
                     return BBs_in_loop
 
         while pc_in_trace in reversed_BB_addr_range:
@@ -212,13 +234,13 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
 
         
 
-    record_update_time(delinq_load_addr, score, pointer_update_time_dict, inter_delinq_loads, delinq_loads_till_use)
-    record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, conf)
+#    record_update_time(delinq_load_addr, score, pointer_update_time_dict, inter_delinq_loads, delinq_loads_till_use)
+#    record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, conf)
 
     return
     
 
-def detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, cfg, conf):
+def detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, prefetch_decisions, cfg, conf):
 
     pc_mem_dis_weights_dict = {}
 
@@ -229,6 +251,7 @@ def detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, cfg, conf)
     time_to_update_dict = {}
     delinq_loads_till_update = {}
     delinq_loads_till_use = {}
+    delinq_loads_update_addr = {}
 
     all_BBs_in_loop = []
 
@@ -242,7 +265,7 @@ def detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, cfg, conf)
         
         BBs_inspected = []
 
-        BBs_in_loop = pointer_analysis_with_trace_hints(reg_read_orig, delinq_load_addr, BB_addr, trace_q, cfg, pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, conf)
+        BBs_in_loop = pointer_analysis_with_trace_hints(reg_read_orig, delinq_load_addr, BB_addr, trace_q, cfg, pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, delinq_loads_update_addr, prefetch_decisions, conf)
         
         if BBs_in_loop:
             all_BBs_in_loop += filter(lambda x: x not in all_BBs_in_loop, BBs_in_loop)
