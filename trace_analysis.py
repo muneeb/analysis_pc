@@ -76,7 +76,7 @@ def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_u
 #                trace_q.popleft()
 
             if pc_in_BB in cfg.ins_tags_dict:
-                if pc_in_BB in conf.all_delinq_loads_list:
+                if pc_in_BB in conf.all_delinq_loads_list and prefetch_decisions:
                     if prefetch_decisions[pc_in_BB].l3_mr >= 0.01:
                         fwd_delinq_loads += 1
                     elif prefetch_decisions[pc_in_BB].l2_mr >= 0.05:
@@ -158,11 +158,11 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
             BBs_in_loop.append(BB_addr)
 
         for pc_in_BB in reversed_BB_addr_range:
-            
+
             tag = None
             if pc_in_BB in cfg.ins_tags_dict:
                 tag = cfg.ins_tags_dict[pc_in_BB]
-                if pc_in_BB in conf.all_delinq_loads_list:
+                if pc_in_BB in conf.all_delinq_loads_list and prefetch_decisions:
                     if prefetch_decisions[pc_in_BB].l3_mr >= 0.01:
                         inter_delinq_loads += 1
                     elif prefetch_decisions[pc_in_BB].l2_mr >= 0.05:
@@ -215,11 +215,12 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
                     record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, delinq_loads_update_addr, prefetch_decisions, conf)
                     return BBs_in_loop
 
-        while pc_in_trace in reversed_BB_addr_range:
-            if trace_q:
-                pc_in_trace = trace_q.popleft()
-            else:
-                return
+#        pc_in_trace = pc_in_BB
+#        while pc_in_trace in reversed_BB_addr_range:
+        if trace_q:
+            pc_in_trace = trace_q.popleft()
+        else:
+            return
 
 
         if pc_in_trace == 0 or pc_in_trace in reversed_BB_addr_range:
@@ -262,7 +263,7 @@ def detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, prefetch_d
             
         trace_q = deque(trace)
         BB_addr = static_BB_cfg.discover_BB_for_address(delinq_load_addr, cfg.BB_dict)
-        
+
         BBs_inspected = []
 
         BBs_in_loop = pointer_analysis_with_trace_hints(reg_read_orig, delinq_load_addr, BB_addr, trace_q, cfg, pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, delinq_loads_update_addr, prefetch_decisions, conf)
@@ -270,8 +271,5 @@ def detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, prefetch_d
         if BBs_in_loop:
             all_BBs_in_loop += filter(lambda x: x not in all_BBs_in_loop, BBs_in_loop)
         
-
-    print len(pc_smptrace_hist.keys())
-    print pointer_update_addr_dict
 
     return (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop)
