@@ -5,6 +5,7 @@ def build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range):
 
     BB_dict = {}
     BB = []
+    BB_start_pc = None
 
     branch_tags = ['IndirectBranch', 'IndirectCondBranch', 'Branch', 'CondBranch', 'Ret']
 
@@ -16,6 +17,13 @@ def build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range):
                 BB_start_pc = BB[0]
                 BB_dict[BB_start_pc] = BB
                 BB = []
+
+    # No branches in the routine
+    if BB_start_pc == None:
+        BB_start_pc = BB[0]
+        BB_dict[BB_start_pc] = BB
+        BB = []
+
 
     br_target_BBs = []
 
@@ -31,6 +39,9 @@ def build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range):
         BB = []
         br_target = br_target_BBs.pop()
         
+        if not br_target in routine_addr_range:
+            continue
+
         i = routine_addr_range.index(br_target)
 
         for pc in routine_addr_range[i:len(routine_addr_range)]:
