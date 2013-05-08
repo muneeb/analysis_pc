@@ -72,8 +72,8 @@ def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_u
             if pc_in_BB == delinq_load_addr:# update_addr_list:
                 break
 
-#            if trace_q and pc_in_BB == trace_q[0]:
-#                trace_q.popleft()
+            if trace_q and pc_in_BB == trace_q[0]:
+                trace_q.popleft()
 
             if pc_in_BB in cfg.ins_tags_dict:
                 if pc_in_BB in conf.all_delinq_loads_list and prefetch_decisions:
@@ -81,7 +81,7 @@ def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_u
                         fwd_delinq_loads += 1
                     elif prefetch_decisions[pc_in_BB].l2_mr >= 0.05:
                         fwd_delinq_loads += 1
-                    elif prefetch_decisions[pc_in_BB].l1_mr >= 0.3:
+                    elif prefetch_decisions[pc_in_BB].l1_mr >= 0.2:
                         fwd_delinq_loads += 1
 
                     
@@ -90,11 +90,14 @@ def record_time_to_update(delinq_load_addr, update_addr, trace_q, cfg, time_to_u
         if pc_in_BB == delinq_load_addr: #update_addr:
             break
             
-        while pc_in_trace in reversed_BB_addr_range:
-            if trace_q:
-                pc_in_trace = trace_q.popleft()
-            else:
-                return
+#        while pc_in_trace in reversed_BB_addr_range:
+        if trace_q:
+            pc_in_trace = trace_q.popleft()
+        else:
+            return
+
+        if pc_in_trace == 0:
+            return
 
         BB_addr = static_BB_cfg.discover_BB_for_address(pc_in_trace, cfg.BB_dict)
         
@@ -167,7 +170,7 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
                         inter_delinq_loads += 1
                     elif prefetch_decisions[pc_in_BB].l2_mr >= 0.05:
                         inter_delinq_loads += 1
-                    elif prefetch_decisions[pc_in_BB].l1_mr >= 0.3:
+                    elif prefetch_decisions[pc_in_BB].l1_mr >= 0.2:
                         inter_delinq_loads += 1
 
             score += 1
@@ -203,6 +206,7 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
                     track_reg = reg_read
                 
                 # Not move but some instruction that changes track_reg and not traceable further
+                # modify this case for the LEA instruction
                 else:
                     if not pc_in_BB in pointer_update_addr_dict:
                         pointer_update_addr_dict[pc_in_BB] = 1
@@ -233,10 +237,9 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
 
         reversed_BB_addr_range = sorted(cfg.BB_dict[BB_addr], reverse=True)
 
-        
 
-#    record_update_time(delinq_load_addr, score, pointer_update_time_dict, inter_delinq_loads, delinq_loads_till_use)
-#    record_time_to_update(delinq_load_addr, pc_in_BB, trace_q, cfg, time_to_update_dict, delinq_loads_till_update, BBs_in_loop, conf)
+
+    # reaching this point is failure to find update instruction
 
     return
     

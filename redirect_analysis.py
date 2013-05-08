@@ -16,14 +16,6 @@ import subprocess
 import trace_analysis
 import static_BB_cfg
 
-#class PrefParams:
-
-#    def __init__(self, delinq_load_addr, pf_type, l1_mr, l2_mr, l3_mr):
-#        self.delinq_load_addr = delinq_load_addr
-#        self.pf_type = pf_type
-#        self.l1_mr = l1_mr
-#        self.l2_mr = l2_mr
-#        self.l3_mr = l3_mr
 
 class PtrPrefParams:
 
@@ -40,6 +32,7 @@ class PtrPrefParams:
         self.fwd_score = fwd_score
         self.freq_delinq_loads_till_use = freq_delinq_loads_till_use
         self.freq_delinq_loads_till_update = freq_delinq_loads_till_update
+        self.is_useful = True
         
 class Conf1:
 
@@ -332,20 +325,20 @@ def check_dominant_direction(update_pc_weights, cfg):
     return None
 
 #check if a prefetch has been inserted in a BB for a given base register. If Yes, then no need to insert more prefetches
-def add_to_BB_indirect_pref_decisions(delinq_load_addr, cfg, conf):
+def add_to_BB_indirect_pref_decisions(delinq_load_addr, schedule_addr, cfg, conf):
 
-    BB_addr = static_BB_cfg.discover_BB_for_address(delinq_load_addr, cfg.BB_dict)
+    BB_addr = static_BB_cfg.discover_BB_for_address(schedule_addr, cfg.BB_dict)
     base_reg_id = cfg.ins_base_reg_dict[delinq_load_addr]
     mem_dis = cfg.ins_mem_dis_dict[delinq_load_addr]
 
     if BB_addr in conf.BB_reg_prefetch_dict:
         if base_reg_id in conf.BB_reg_prefetch_dict[BB_addr]:
-            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] += [(delinq_load_addr, mem_dis)]
+            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] += [(schedule_addr, mem_dis, delinq_load_addr)]
         else:
-            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = [(delinq_load_addr, mem_dis)]
+            conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = [(schedule_addr, mem_dis, delinq_load_addr)]
     else:
         conf.BB_reg_prefetch_dict[BB_addr] = {}
-        conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = [(delinq_load_addr, mem_dis)]
+        conf.BB_reg_prefetch_dict[BB_addr][base_reg_id] = [(schedule_addr, mem_dis, delinq_load_addr)]
 
 
 def BB_prefetch_status(delinq_load_addr, cfg, conf):
@@ -401,19 +394,17 @@ def are_equal(delinq_load_addr, update_addr, cfg):
 
     return False
 
-def do_cost_benefit_analysis(cfg, conf, prefetch_decisions):
+def do_cost_benefit_analysis(cfg, conf, delinq_load_addr, prefetch_decisions):
 
-    print">>>>>>"
-    print">>>>>>"
-    print">>>>>>"
 
-    for addr in conf.indirect_pref_decisions.keys():
+    for addr in [delinq_load_addr]: #conf.indirect_pref_decisions.keys():
         
         is_useless = False
 
         if prefetch_decisions[addr].l3_mr < 0.007:
-            if prefetch_decisions[addr].l2_mr < 0.05:
-                if prefetch_decisions[addr].l1_mr < 0.25:
+            if prefetch_decisions[addr].l2_mr < 0.04:
+                if prefetch_decisions[addr].l1_mr < 0.15:
+                    conf.indirect_pref_decisions[addr].is_useful = False
                     continue
         
         spec_resched = True
@@ -441,28 +432,14 @@ def do_cost_benefit_analysis(cfg, conf, prefetch_decisions):
                 is_useless = True
 
         
-        if not is_useless:
-#            print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d:%d:%d <<<"%(conf.indirect_pref_decisions[addr].schedule_addr, 
-#                                                     conf.indirect_pref_decisions[addr].pf_type, 
-#                                                     conf.indirect_pref_decisions[addr].clobber_reg, 
-#                                                     conf.indirect_pref_decisions[addr].base_reg, 
-#                                                     conf.indirect_pref_decisions[addr].mem_dis, 
-#                                                     conf.indirect_pref_decisions[addr].freq_update_pc, 
-#                                                     conf.indirect_pref_decisions[addr].updated_reg, 
-#                                                     conf.indirect_pref_decisions[addr].score, 
-#                                                     conf.indirect_pref_decisions[addr].fwd_score,
-#                                                     conf.indirect_pref_decisions[addr].freq_delinq_loads_till_use,
-#                                                     conf.indirect_pref_decisions[addr].freq_delinq_loads_till_update)
+        if is_useless:
+            conf.indirect_pref_decisions[addr].is_useful = False
+            continue
+            
+        sched_addr = conf.indirect_pref_decisions[addr].schedule_addr
 
-            print">>> %lu:%s:%s:%s:%d:%lu:%s:%d <<<"%(conf.indirect_pref_decisions[addr].schedule_addr, 
-                                                     conf.indirect_pref_decisions[addr].pf_type, 
-                                                     conf.indirect_pref_decisions[addr].clobber_reg, 
-                                                     conf.indirect_pref_decisions[addr].base_reg, 
-                                                     conf.indirect_pref_decisions[addr].mem_dis, 
-                                                     conf.indirect_pref_decisions[addr].freq_update_pc, 
-                                                     conf.indirect_pref_decisions[addr].updated_reg, 
-                                                     conf.indirect_pref_decisions[addr].score)
-
+        add_to_BB_indirect_pref_decisions(addr, sched_addr, cfg, conf)
+        
 
 
 def decide_prefetch_schedules(cfg, conf):
@@ -475,6 +452,8 @@ def decide_prefetch_schedules(cfg, conf):
 
             addr_list = map(lambda x: x[0], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
             mem_dis_list = map(lambda x: x[1], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
+            delinq_load_addr_list = map(lambda x: x[2], conf.BB_reg_prefetch_dict[BB_addr][base_reg_id])
+            delinq_load_addr_list = filter(lambda x: x not in delinq_load_addr_list, delinq_load_addr_list)
             max_dis = max(mem_dis_list)
             min_dis = min(mem_dis_list)
 
@@ -492,35 +471,48 @@ def decide_prefetch_schedules(cfg, conf):
             #schedule earliest
             schedule_addr = min(addr_list)
 
-            conf.indirect_pref_decisions[schedule_addr].pf_type = pf_type
+            nta_str=""
+            for addr in delinq_load_addr_list:
+                if "nta" in conf.indirect_pref_decisions[addr].pf_type:
+                    nta_str="nta"
+                else:
+                    nta_str=""
+                    break
+
+            print >> sys.stderr, "--schedule %ul--"%(schedule_addr)
+            print >> sys.stderr, "--address list--"
+            print >> sys.stderr, addr_list
+            print >> sys.stderr, "--mem dis list--"
+            print >> sys.stderr, mem_dis_list
             
-            for addr in addr_list:
-                if addr == schedule_addr:
+
+            for addr in delinq_load_addr_list:
+                if conf.indirect_pref_decisions[addr].schedule_addr == schedule_addr:
+                    conf.indirect_pref_decisions[addr].pf_type = pf_type + nta_str
                     continue
-                del conf.indirect_pref_decisions[addr]
 
-#            print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d:%d:%d <<<"%(conf.indirect_pref_decisions[schedule_addr].schedule_addr, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].pf_type, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].clobber_reg, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].base_reg, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].mem_dis, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].freq_update_pc, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].updated_reg, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].score, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].fwd_score,
-#                                                     conf.indirect_pref_decisions[schedule_addr].freq_delinq_loads_till_use,
-#                                                     conf.indirect_pref_decisions[schedule_addr].freq_delinq_loads_till_update)
-#            print ">>>grouped>>>"+str(addr_list)
+                conf.indirect_pref_decisions[addr].is_useful = False
 
-#            print">>> %lu:%s:%s:%s:%d:%lu:%s:%d <<<"%(conf.indirect_pref_decisions[schedule_addr].schedule_addr, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].pf_type, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].clobber_reg, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].base_reg, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].mem_dis, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].freq_update_pc, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].updated_reg, 
-#                                                     conf.indirect_pref_decisions[schedule_addr].score)
-#                                               
+
+def print_indirect_prefetch_decisions(conf):
+    
+    print">>>>>>"
+    print">>>>>>"
+    print">>>>>>"
+
+    for addr in conf.indirect_pref_decisions.keys():
+        
+        if conf.indirect_pref_decisions[addr].is_useful:
+
+            print">>> %lu:%s:%s:%s:%d:%lu:%s:%d <<<"%(conf.indirect_pref_decisions[addr].schedule_addr, 
+                                                      conf.indirect_pref_decisions[addr].pf_type, 
+                                                      conf.indirect_pref_decisions[addr].clobber_reg, 
+                                                      conf.indirect_pref_decisions[addr].base_reg, 
+                                                      conf.indirect_pref_decisions[addr].mem_dis, 
+                                                      conf.indirect_pref_decisions[addr].freq_update_pc, 
+                                                      conf.indirect_pref_decisions[addr].updated_reg, 
+                                                      conf.indirect_pref_decisions[addr].score)
+
 
 def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf):
 
@@ -529,7 +521,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
 
     conf.resolved_count += 1
 
-    pf_type = BB_prefetch_status(delinq_load_addr, cfg, conf)
+    pf_type = "ptr" #BB_prefetch_status(delinq_load_addr, cfg, conf)
 
     available_vol_regs_list = available_vol_regs(cfg.ins_src_regs_dict, cfg.ins_dst_regs_dict)
 
@@ -538,8 +530,6 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
     update_pc_weights = map(lambda tup: tuple([tup[0], round(float(tup[1])/float(total_weight), 2)]), pointer_update_addr_dict.items())
 
     update_pc_weights = sorted(update_pc_weights, key=operator.itemgetter(1), reverse=True)
-
-    print update_pc_weights
 
     freq_update_pc_weight = update_pc_weights[0]
 
@@ -571,7 +561,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
         
         freq_delinq_loads_till_use = delinq_loads_till_use_freq_list[0][0]
 
-    if freq_update_pc_weight[1] < 0.5:
+    if freq_update_pc_weight[0] < 0.5:
         freq_update_pc = check_dominant_direction(update_pc_weights, cfg)        
 
         if freq_update_pc is None:
@@ -583,10 +573,11 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
 
     freq_update_pc = freq_update_pc_weight[0]
 
+#    print "-- %lx -- %lx --"%(delinq_load_addr, freq_update_pc)
 
     if freq_update_pc in cfg.ins_tags_dict.keys():
         if (cfg.ins_tags_dict[freq_update_pc] == "Read" or cfg.ins_tags_dict[freq_update_pc] == "Write") and freq_update_pc in cfg.ins_base_reg_dict.keys():
-        
+            
             mem_dis = cfg.ins_mem_dis_dict[freq_update_pc]
 
             base_reg_id = cfg.ins_base_reg_dict[freq_update_pc]
@@ -597,8 +588,6 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                 pf_type = "ind"
                 print >> sys.stderr, "%d -  %lx no base_reg id <<<"%(conf.resolved_count, freq_update_pc)
                 return
-
-            add_to_BB_indirect_pref_decisions(delinq_load_addr, cfg, conf)
                 
             base_reg = cfg.regs_dict[base_reg_id]
             updated_reg = cfg.regs_dict[updated_reg_id]
@@ -608,6 +597,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
             if time_to_update:
                 fwd_score = time_to_update[0][0]
 
+            # it is not a nested object (reschedulable)
             reschedule =  is_reschedulable(delinq_load_addr, freq_update_pc, cfg)
 
             if not available_vol_regs_list:
@@ -629,16 +619,16 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                     if reg in cfg.regs_dict:
                         clobber_reg = cfg.regs_dict[reg]
                         break
-    
+
             #when a clobber_reg is available, it is not a nested object (reschedulable) and 
             if clobber_reg != "None" and reschedule and not are_equal(delinq_load_addr, freq_update_pc, cfg):
                 
                 schedule_addr = delinq_load_addr
-                reschedule_addr = static_BB_cfg.is_mem_loc_accessed_in_BB(base_reg_id, mem_dis, delinq_load_addr, cfg)
-                if not reschedule_addr == None:
-                    if reschedule_addr < schedule_addr:
-                        schedule_addr = reschedule_addr
-                        clobber_reg = "None"
+#                reschedule_addr = static_BB_cfg.is_mem_loc_accessed_in_BB(base_reg_id, mem_dis, delinq_load_addr, cfg)
+#                if not reschedule_addr == None:
+#                    if reschedule_addr < schedule_addr:
+#                        schedule_addr = reschedule_addr
+#                        clobber_reg = "None"
             else:
                 schedule_addr = freq_update_pc
                 mem_dis = cfg.ins_mem_dis_dict[delinq_load_addr]
@@ -647,7 +637,8 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                     print "--nested object--"
 
             print"%d>>>%lx:%d:%d"%(conf.resolved_count, delinq_load_addr, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
-            print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score, )
+            print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score)
+#            print">>> %lu:%s:%s:%s:%d:%lu:%s:%d <<<"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score)
             
             conf.indirect_pref_decisions[delinq_load_addr] = PtrPrefParams(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
 
@@ -690,8 +681,6 @@ def analyze_non_strided_delinq_loads(global_pc_smptrace_hist, prefetch_decisions
 
     for delinq_load_addr in delinq_load_address_list:
 
-        print "--%lx--" % (delinq_load_addr)
-
         routine = subprocess.Popen(["/home/muneeb/git/disasm/obj-intel64/get_routine", "-a", str(delinq_load_addr),"-i", conf.exec_file], stdout=subprocess.PIPE).communicate()[0]
 
         [ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict] = parse_routine_info(routine, conf)
@@ -709,8 +698,12 @@ def analyze_non_strided_delinq_loads(global_pc_smptrace_hist, prefetch_decisions
         
 #        print "\n\n"
         
+        if delinq_load_addr in conf.indirect_pref_decisions:
+            do_cost_benefit_analysis(cfg, conf, delinq_load_addr, prefetch_decisions)
+        
     decide_prefetch_schedules(cfg, conf)
-    do_cost_benefit_analysis(cfg, conf, prefetch_decisions)
+    print_indirect_prefetch_decisions(conf)
+
 
 
 def main():
