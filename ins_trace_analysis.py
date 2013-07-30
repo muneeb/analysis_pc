@@ -1,4 +1,4 @@
-2#!/usr/bin/python
+#!/usr/bin/python
 
 import string
 import sys

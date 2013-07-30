@@ -3,6 +3,7 @@ import sys
 import math
 import os
 import string
+import gc
 
 import operator
 
@@ -18,6 +19,7 @@ import missratio
 
 import redirect_analysis
 import trace_analysis
+import ins_trace_analysis
 
 __version__ = "$Revision$"
 
@@ -490,8 +492,7 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
 def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf):
 
     cache_line_size = conf.line_size
-    
-    avg_mem_latency = 150
+
 
     analysis_type = conf.analysis_type
     cyc_per_mop = conf.cyc_per_mop
@@ -502,6 +503,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     l3_size = conf.l3_size
     l2_size = conf.l2_size
     l1_size = conf.l1_size
+
+    avg_mem_latency = memory_latency
 
     avg_iters = 0
 
@@ -552,6 +555,22 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             if avg_r == 0:
                 avg_r = 1
 
+            recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) 
+            recur_freq_thr = 200 #int(recur_freq[0])/6
+            recur_freq_out_loop = filter(lambda y: y > recur_freq_thr, recur_freq)
+            recur_freq_in_loop = filter(lambda y: y <= recur_freq_thr, recur_freq)
+
+            loop_recur_freq = sum(recur_freq_in_loop)
+            loop_reach_freq = sum(recur_freq_out_loop)
+
+            if loop_reach_freq == 0:
+                loop_reach_freq = 1
+ 
+            avg_iters = float(float(loop_recur_freq)/float(loop_reach_freq))
+                
+            if avg_iters == 0:
+                avg_iters = 1
+
             if abs(stride) < cache_line_size:
                     
                 no_iters = int(round(float(cache_line_size) / float(abs(stride)) )) - 1
@@ -565,7 +584,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                     pd = 1 
                         
                 sd = cache_line_size * pd
-
+                stride = cache_line_size
+                
             else:
             
                 no_iters = 1
@@ -585,6 +605,11 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 #                    break
 
             pref_pc_sd_hist[pc] = sd
+
+            if conf.detailed_modeling == 1:
+                if (avg_iters/2) < pd:
+                    pd = math.ceil(float(avg_iters)/float(2)) 
+                    sd = stride * pd 
 
 #            if unrolled_loop_mop == 0:
             print"%ld:pf:%d"%(pc, int(sd))
@@ -682,15 +707,9 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 #        print >> sys.stderr,"\n\n\n"
         
 
-        if float(float(max_stride_region_count) / float(total_stride_count)) < float(0.7):
+        if float(float(max_stride_region_count) / float(total_stride_count)) < float(0.6):
             remove_pcs.append(pc)
-#            non_l1_accesses = 0
-#            for (sdist, count) in global_pc_fwd_sdist_hist[pc].items():
-#                if sdist > float(float(conf.l1_size) * 1024 / float(conf.line_size)): #1024:
-#                    non_l1_accesses += count
-            
 
-#            if float(float(non_l1_accesses)/float(total_accesses) >= 0.005) and bool(conf.all_delinq_loads):
             if l1_mr >= 0.005 and bool(conf.all_delinq_loads):
                 if isnontemporal:
                     pf_type = "ptrnta"
@@ -748,15 +767,21 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             avg_r = 1
             
 
-        recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) #global_pc_recur_hist[pc].values()
-        recur_freq_thr = int(recur_freq[0])/6
-        loop_recur_freq = sum(recur_freq)
-        recur_freq_out_loop = filter(lambda y: y < recur_freq_thr, recur_freq)
+        recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) 
+        recur_freq_thr = 200 #int(recur_freq[0])/6
+        recur_freq_out_loop = filter(lambda y: y > recur_freq_thr, recur_freq)
+        recur_freq_in_loop = filter(lambda y: y <= recur_freq_thr, recur_freq)
+
+        loop_recur_freq = sum(recur_freq_in_loop)
         loop_reach_freq = sum(recur_freq_out_loop)
+
         if loop_reach_freq == 0:
             loop_reach_freq = 1
  
         avg_iters = float(float(loop_recur_freq)/float(loop_reach_freq))
+
+        if avg_iters == 0:
+            avg_iters = 1
 
         # cycles/memory-operation (without h/w pf, with h/w pf)
         # gcc-166 3.74, 3.5 (1.3 works best, 3.0)
@@ -781,6 +806,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             if pd == 0:
                 pd = 1 
 
+
+            stride = cache_line_size
 
             sd = cache_line_size * pd
 
@@ -818,6 +845,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         print >> sys.stderr, pc
         print >> sys.stderr, total_count
         print >> sys.stderr, stride, pd, sd, avg_iters
+        print >> sys.stderr, "\n\n"
+        print >> sys.stderr, recur_freq
 
         print >> sys.stderr, "\n\n\n"
                 
@@ -873,7 +902,12 @@ def main():
 
         files_required = math.ceil(float(conf.num_samples) / float(1200)) + 1 # 1200 is the number of samples per file
 
-        files_sapcing = int(math.floor(float(num_sample_files) / float(files_required)))
+        files_sapcing = int(math.ceil(float(num_sample_files) / float(files_required)))
+
+        print >> sys.stderr, "files spacing: %d"%(files_sapcing)
+
+        if files_sapcing == 0:
+            files_sapcing = 1
 
         file_no = 0
 
@@ -927,10 +961,22 @@ def main():
 
         pc_smptrace_hist = burst_hists[0][6]
 
-        trace_analysis.add_trace_to_global_pc_smptrace_hist(global_pc_smptrace_hist, pc_smptrace_hist)
+        ins_trace_analysis.add_trace_to_global_pc_smptrace_hist(global_pc_smptrace_hist, pc_smptrace_hist)
 
 
     generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf)
+
+    full_pc_stride_hist.clear()
+
+    global_pc_fwd_sdist_hist.clear()
+
+    global_pc_sdist_hist.clear()
+
+    global_pc_corr_hist.clear()
+
+    global_pc_recur_hist.clear()
+    
+    gc.collect()
 
     redirect_analysis.analyze_non_strided_delinq_loads(global_pc_smptrace_hist, conf.prefetch_decisions, conf.exec_file)
 

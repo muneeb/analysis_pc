@@ -7,6 +7,7 @@ import operator
 import os
 import pyusf
 import utils
+import math
 
 from uart.hist import Hist
 import uart.sample_filter as sample_filter
@@ -15,6 +16,9 @@ from optparse import OptionParser
 import subprocess
 import trace_analysis
 import static_BB_cfg
+import ins_trace_analysis
+import ins_trace_ptr_nobj_analysis
+import disassm
 
 
 class PtrPrefParams:
@@ -76,6 +80,11 @@ class Conf:
                           dest="path",
                           help="Specify path for burst sample files")
 
+        parser.add_option("-n", "--num-samples",
+                          type="int", default=None,
+                          dest="num_samples",
+                          help="Number of samples to be considered for analysis")
+
         parser.add_option("--pref-dec",
                           type="str", default=None,
                           dest="pref_dec",
@@ -104,22 +113,8 @@ class Conf:
         self.all_delinq_loads_list = []
         self.resolved_count = 0
         self.pref_dec = opts.pref_dec
+        self.num_samples = opts.num_samples
 
-class CFG_Info:
-
-    def __init__(self, ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict, BB_dict):
-        self.ins_src_regs_dict = ins_src_regs_dict
-        self.ins_dst_regs_dict = ins_dst_regs_dict
-        self.ins_tags_dict = ins_tags_dict
-        self.branch_dict = branch_dict
-        self.routine_addr_range = routine_addr_range
-        self.ins_base_reg_dict = ins_base_reg_dict
-        self.ins_mem_dis_dict = ins_mem_dis_dict
-        self.ins_idx_reg_dict = ins_idx_reg_dict
-        self.ins_mem_scale_dict = ins_mem_scale_dict
-        self.BB_dict = BB_dict
-        self.vol_regs_dict = {17:"rdx", 18:"rcx", 19:"rax", 20:"r8", 21:"r9", 22:"r10", 23:"r11"}
-        self.regs_dict = {12:"rdi", 13:"rsi", 16:"rbx", 17:"rdx", 18:"rcx", 19:"rax", 20:"r8", 21:"r9", 22:"r10", 23:"r11", 24:"r12", 25:"r13", 26:"r14", 27:"r15"}
 
 def get_delinq_load_address_list(conf):
 
@@ -148,112 +143,6 @@ def get_delinq_load_address_list(conf):
 
     return delinq_load_address_list 
 
-def parse_routine_info(routine, conf):
-
-    ins_src_regs_dict = {}
-    ins_dst_regs_dict = {}
-    ins_tags_dict = {}
-    branch_dict = {}
-    routine_addr_range = []
-
-    # information maps for Memory operations
-    ins_base_reg_dict = {}
-    ins_mem_dis_dict = {}
-    ins_idx_reg_dict = {}
-    ins_mem_scale_dict = {}
-
-    tag_list = ['IndirectBranch', 'IndirectCondBranch', 'Branch', 'CondBranch', 'Call', 'Ret', 'Stack', 'Read', 'Write', 'Move', 'Nop', 'Lea']
-
-    line_tokens = routine.split('\n')
-
-    target_address = 0
-    tag_br_target_for_this_pc = 0
-
-    for line in line_tokens:
-
-        tokens = line.split()
-
-        if(len(tokens) > 0 and tokens[0] == "instr:"):
-            instr_addr = int(tokens[1], 16)
-            routine_addr_range.append(instr_addr)
-            target_address = conf.re_hex_address.findall(line)
-
-            if tag_br_target_for_this_pc != 0:
-                branch_dict[tag_br_target_for_this_pc].append(instr_addr)
-                tag_br_target_for_this_pc = 0
-
-            instr = tokens[2]
-
-#            print line
-
-        elif(len(tokens) > 0):
-            
-            src_regs = []
-            dst_regs = []
-            
-            for reg_info in tokens:
-                
-                if reg_info.find("R:") != -1:
-                    reg_info_tokens = reg_info.split(":")
-                    reg_id = int(reg_info_tokens[1], 16)
-                    if not reg_id in src_regs:
-                        src_regs.append(reg_id)
-
-                elif reg_info.find("W:") != -1:
-                    reg_info_tokens = reg_info.split(":")
-                    reg_id = int(reg_info_tokens[1], 16)
-                    if not reg_id in dst_regs:
-                        dst_regs.append(reg_id)
-
-                elif reg_info.find("MemBaseReg:") != -1:
-                    reg_info_tokens = reg_info.split(":")
-                    base_reg_id = int(reg_info_tokens[1], 16)
-                    ins_base_reg_dict[instr_addr] = base_reg_id
-
-                elif reg_info.find("MemDis:") != -1:
-                    reg_info_tokens = reg_info.split(":")
-                    mem_dis = int(reg_info_tokens[1], 16)
-                    ins_mem_dis_dict[instr_addr] = mem_dis
-
-                elif reg_info.find("MemIdxReg:") != -1:
-                    reg_info_tokens = reg_info.split(":")
-                    idx_reg_id = int(reg_info_tokens[1], 16)
-                    ins_idx_reg_dict[instr_addr] = idx_reg_id
-
-                elif reg_info.find("MemScale:") != -1:
-                    reg_info_tokens = reg_info.split(":")
-                    mem_scale = int(reg_info_tokens[1], 16)
-                    ins_mem_scale_dict[instr_addr] = mem_scale
-
-            ins_src_regs_dict[instr_addr] =  src_regs
-
-            if len(dst_regs) > 0:
-                ins_dst_regs_dict[instr_addr] =  dst_regs
-
-            ins_tag = tokens.pop()
-
-            if( ins_tag in tag_list ):
-                ins_tags_dict[instr_addr] = ins_tag
-
-            if( ins_tag == 'Branch'):
-                br_target_pc = int(target_address[0], 16)
-                branch_dict[instr_addr] = [br_target_pc]
-            elif( ins_tag == 'CondBranch'):
-                br_target_pc = int(target_address[0], 16)
-                tag_br_target_for_this_pc = instr_addr #add information for fall through in next iteration when address for next instruction is discovered
-                branch_dict[instr_addr] = [br_target_pc]
-            elif( ins_tag == 'IndirectBranch' or  ins_tag == 'Ret'):
-                br_target_pc = 0   # target instruction is not known
-                branch_dict[instr_addr] = [br_target_pc]
-            elif( ins_tag == 'IndirectCondBranch'):
-                br_target_pc = 0   # target instruction is not known
-                tag_br_target_for_this_pc = instr_addr #add information for fall through in next iteration when address for next instruction is discovered
-                branch_dict[instr_addr] = [br_target_pc]
-
-#            print line
-
-
-    return [ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict]
 
 def open_sample_file(file_name, line_size=64):
     try:
@@ -305,6 +194,9 @@ def check_dominant_direction(update_pc_weights, cfg):
         pc = pc_freq_tup[0]
         freq = pc_freq_tup[1]
         
+        if not pc in cfg.ins_base_reg_dict:
+            continue
+
         base_reg_id = cfg.ins_base_reg_dict[pc]
         mem_dis = cfg.ins_mem_dis_dict[pc]
 
@@ -419,6 +311,9 @@ def do_cost_benefit_analysis(cfg, conf, delinq_load_addr, prefetch_decisions):
 
         if spec_resched:
             
+            if ins_count_till_use < 2:
+                spec_resched = False
+
             if ins_count_till_update  < 12:
                 if delinq_loads_till_update < 2:
                     conf.indirect_pref_decisions[addr].clobber_reg = "None"
@@ -496,15 +391,11 @@ def decide_prefetch_schedules(cfg, conf):
 
 def print_indirect_prefetch_decisions(conf):
     
-    print">>>>>>"
-    print">>>>>>"
-    print">>>>>>"
-
     for addr in conf.indirect_pref_decisions.keys():
         
         if conf.indirect_pref_decisions[addr].is_useful:
 
-            print">>> %lu:%s:%s:%s:%d:%lu:%s:%d <<<"%(conf.indirect_pref_decisions[addr].schedule_addr, 
+            print"0x%lx:%s:%s:%s:%d:0x%lx:%s:%d"%(conf.indirect_pref_decisions[addr].schedule_addr, 
                                                       conf.indirect_pref_decisions[addr].pf_type, 
                                                       conf.indirect_pref_decisions[addr].clobber_reg, 
                                                       conf.indirect_pref_decisions[addr].base_reg, 
@@ -514,7 +405,7 @@ def print_indirect_prefetch_decisions(conf):
                                                       conf.indirect_pref_decisions[addr].score)
 
 
-def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf):
+def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind=False, stride=0):
 
     if not pointer_update_addr_dict:
         return
@@ -522,6 +413,9 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
     conf.resolved_count += 1
 
     pf_type = "ptr" #BB_prefetch_status(delinq_load_addr, cfg, conf)
+
+    if is_ind:
+        pf_type = "ptrind"
 
     available_vol_regs_list = available_vol_regs(cfg.ins_src_regs_dict, cfg.ins_dst_regs_dict)
 
@@ -561,7 +455,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
         
         freq_delinq_loads_till_use = delinq_loads_till_use_freq_list[0][0]
 
-    if freq_update_pc_weight[0] < 0.5:
+    if freq_update_pc_weight[1] < 0.5:
         freq_update_pc = check_dominant_direction(update_pc_weights, cfg)        
 
         if freq_update_pc is None:
@@ -573,10 +467,10 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
 
     freq_update_pc = freq_update_pc_weight[0]
 
-#    print "-- %lx -- %lx --"%(delinq_load_addr, freq_update_pc)
+    print >> sys.stderr,"delinq load addr: 0x%lx -- freq update pc: 0x%lx -- dominant update freq: %lf"%(delinq_load_addr, freq_update_pc, freq_update_pc_weight[1])
 
     if freq_update_pc in cfg.ins_tags_dict.keys():
-        if (cfg.ins_tags_dict[freq_update_pc] == "Read" or cfg.ins_tags_dict[freq_update_pc] == "Write") and freq_update_pc in cfg.ins_base_reg_dict.keys():
+        if (cfg.ins_tags_dict[freq_update_pc] == "Read" or cfg.ins_tags_dict[freq_update_pc] == "Write" ) and freq_update_pc in cfg.ins_base_reg_dict.keys():
             
             mem_dis = cfg.ins_mem_dis_dict[freq_update_pc]
 
@@ -588,7 +482,11 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                 pf_type = "ind"
                 print >> sys.stderr, "%d -  %lx no base_reg id <<<"%(conf.resolved_count, freq_update_pc)
                 return
-                
+            elif not base_reg_id in cfg.regs_dict:
+                pf_type = "ind"
+                print >> sys.stderr, "%d -  %lx unusual base_reg id %d <<<"%(conf.resolved_count, freq_update_pc, base_reg_id)
+                return
+            
             base_reg = cfg.regs_dict[base_reg_id]
             updated_reg = cfg.regs_dict[updated_reg_id]
 
@@ -598,7 +496,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                 fwd_score = time_to_update[0][0]
 
             # it is not a nested object (reschedulable)
-            reschedule =  is_reschedulable(delinq_load_addr, freq_update_pc, cfg)
+            reschedule =  True #is_reschedulable(delinq_load_addr, freq_update_pc, cfg)
 
             if not available_vol_regs_list:
                 if reschedule and delinq_load_addr != freq_update_pc:
@@ -634,11 +532,16 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                 mem_dis = cfg.ins_mem_dis_dict[delinq_load_addr]
                 clobber_reg = "None"
                 if not reschedule:
-                    print "--nested object--"
+                    print >> sys.stderr, "--nested object--"
 
-            print"%d>>>%lx:%d:%d"%(conf.resolved_count, delinq_load_addr, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
-            print">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score)
-#            print">>> %lu:%s:%s:%s:%d:%lu:%s:%d <<<"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score)
+            if is_ind:
+                updated_reg_id = cfg.ins_idx_reg_dict[freq_update_pc]
+                updated_reg = cfg.regs_dict[updated_reg_id]
+                score = cfg.ins_mem_scale_dict[freq_update_pc]
+                mem_dis = stride
+
+            print >> sys.stderr, "%d>>>%lx:%d:%d"%(conf.resolved_count, delinq_load_addr, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
+            print >> sys.stderr, ">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<\n\n"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score)
             
             conf.indirect_pref_decisions[delinq_load_addr] = PtrPrefParams(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
 
@@ -677,26 +580,18 @@ def analyze_non_strided_delinq_loads(global_pc_smptrace_hist, prefetch_decisions
 
     conf = Conf1(exec_file, delinq_load_address_list)
 
-    print "Starting trace analysis..."
+    print >> sys.stderr, delinq_load_address_list
 
     for delinq_load_addr in delinq_load_address_list:
 
-        routine = subprocess.Popen(["/home/muneeb/git/disasm/obj-intel64/get_routine", "-a", str(delinq_load_addr),"-i", conf.exec_file], stdout=subprocess.PIPE).communicate()[0]
+        cfg = disassm.get_func_disassm(conf.exec_file, delinq_load_addr)
 
-        [ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict] = parse_routine_info(routine, conf)
-
-        BB_dict = static_BB_cfg.build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range)
-    
-        cfg = CFG_Info(ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict, BB_dict)
-
-        if not (ins_tags_dict[delinq_load_addr] == 'Read' or ins_tags_dict[delinq_load_addr] == 'Write'):
+        if not (cfg.ins_tags_dict[delinq_load_addr] == 'Read' or cfg.ins_tags_dict[delinq_load_addr] == 'Write'):
             continue
 
-        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop) = trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, prefetch_decisions, cfg, conf)
+        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop) = ins_trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, prefetch_decisions, cfg, conf)
 
         analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf)
-        
-#        print "\n\n"
         
         if delinq_load_addr in conf.indirect_pref_decisions:
             do_cost_benefit_analysis(cfg, conf, delinq_load_addr, prefetch_decisions)
@@ -723,10 +618,14 @@ def main():
     global_prefetchable_pcs = []
 
     global_pc_smptrace_hist = {}
+    global_pc_stride_hist = {}
 
     conf = Conf()
 
-    delinq_load_addr = int(conf.dec_address, 10)
+    if not conf.hex_address == None:
+        delinq_load_addr = int(conf.hex_address, 16)
+    else:
+        delinq_load_addr = int(conf.dec_address, 10)
 
     delinq_load_address_list = get_delinq_load_address_list(conf)
 
@@ -736,6 +635,28 @@ def main():
     listing = os.listdir(conf.path)
 
     print "building trace maps..."
+
+    if not conf.num_samples is None:
+
+        num_sample_files = len(listing)
+
+        files_required = math.ceil(float(conf.num_samples) / float(1200)) + 1 # 1200 is the number of samples per file
+
+        files_sapcing = int(math.ceil(float(num_sample_files) / float(files_required)))
+
+        print >> sys.stderr, "files spacing: %d"%(files_sapcing)
+
+        if files_sapcing == 0:
+            files_sapcing = 1
+
+        file_no = 0
+
+        listing = []
+        
+        while file_no < num_sample_files:
+            file_name = "sample."+str(file_no)
+            listing.append(file_name)
+            file_no += files_sapcing
 
     for infile in listing:
 
@@ -760,38 +681,25 @@ def main():
         for (pc_rdist_hist, pc_stride_hist, pc_freq_hist, pc_time_hist, pc_corr_hist, pc_fwd_rdist_hist, pc_smptrace_hist) in burst_hists:
             continue
 
-        trace_analysis.add_trace_to_global_pc_smptrace_hist(global_pc_smptrace_hist, pc_smptrace_hist)
+        ins_trace_ptr_nobj_analysis.add_trace_to_global_pc_smptrace_hist(global_pc_smptrace_hist, pc_smptrace_hist)
+        ins_trace_ptr_nobj_analysis.add_to_pc_stride_hist(pc_stride_hist, global_pc_stride_hist)
 
-    print "Starting trace analysis..."
+    print >> sys.stderr, "Starting trace analysis..."
 
     for delinq_load_addr in delinq_load_address_list:
 
-#        print "--%lx--" % (delinq_load_addr)
-
-        routine = subprocess.Popen(["/home/muneeb/git/disasm/obj-intel64/get_routine", "-a", str(delinq_load_addr),"-i", conf.exec_file], stdout=subprocess.PIPE).communicate()[0]
-
-        [ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict] = parse_routine_info(routine, conf)
-
-        BB_dict = static_BB_cfg.build_static_routine_CFG(ins_tags_dict, branch_dict, routine_addr_range)
+        cfg = disassm.get_func_disassm(conf.exec_file, delinq_load_addr)
     
-        cfg = CFG_Info(ins_src_regs_dict, ins_dst_regs_dict, ins_tags_dict, branch_dict, routine_addr_range, ins_base_reg_dict, ins_mem_dis_dict, ins_idx_reg_dict, ins_mem_scale_dict, BB_dict)
-
-        if not (ins_tags_dict[delinq_load_addr] == 'Read' or ins_tags_dict[delinq_load_addr] == 'Write'):
+        if not (cfg.ins_tags_dict[delinq_load_addr] == 'Read' or cfg.ins_tags_dict[delinq_load_addr] == 'Write'):
             continue
 
-#        print BB_dict
+        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, is_ind, stride) = ins_trace_ptr_nobj_analysis.detect_pointer_chasing(global_pc_smptrace_hist, global_pc_stride_hist, delinq_load_addr, None, cfg, conf)
 
-   #     pointer_update_instr_list = static_BB_cfg.discover_pointer_chasing_static(cfg, delinq_load_addr)
-        
-        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop) = trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, None, cfg, conf)
+        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind, stride)
 
-#        print pointer_update_addr_dict.items()
-
-        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf)
-
-#        print "\n\n"
-        
     decide_prefetch_schedules(cfg, conf)
+    print_indirect_prefetch_decisions(conf)
+
 
 if __name__ == "__main__":
     main()

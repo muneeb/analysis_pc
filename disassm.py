@@ -71,8 +71,7 @@ def parse_routine_info(routine):
 
             instr = tokens[2]
 
-            print line
-
+    
         elif(len(tokens) > 0):
             
             src_regs = []
