@@ -40,7 +40,7 @@ class PtrPrefParams:
         
 class Conf1:
 
-    def __init__(self, exec_file, all_delinq_loads_list):
+    def __init__(self, exec_file, all_delinq_loads_list, num_samples, avg_mem_latency):
         self.exec_file = exec_file
 
         self.re_hex_address = re.compile("0[xX][0-9a-fA-F]+")
@@ -50,6 +50,8 @@ class Conf1:
         self.indirect_pref_decisions = {}
         self.all_delinq_loads_list = all_delinq_loads_list
         self.resolved_count = 0
+        self.num_samples = num_samples
+        self.avg_mem_latency = avg_mem_latency
 
 class Conf:
     def __init__(self):
@@ -293,11 +295,15 @@ def do_cost_benefit_analysis(cfg, conf, delinq_load_addr, prefetch_decisions):
         
         is_useless = False
 
-        if prefetch_decisions[addr].l3_mr < 0.007:
-            if prefetch_decisions[addr].l2_mr < 0.04:
-                if prefetch_decisions[addr].l1_mr < 0.15:
-                    conf.indirect_pref_decisions[addr].is_useful = False
-                    continue
+#        if prefetch_decisions[addr].l3_mr < 0.007:
+#            if prefetch_decisions[addr].l2_mr < 0.04:
+#                if prefetch_decisions[addr].l1_mr < 0.15:
+        cb_score = float(5)/float(conf.avg_mem_latency)
+        if prefetch_decisions[addr].l1_mr < cb_score and prefetch_decisions[addr].l3_mr < 0.005:
+            conf.indirect_pref_decisions[addr].is_useful = False
+
+            print >> sys.stderr, "irr-cb-ignored: %lx"%(delinq_load_addr)
+            continue
         
         spec_resched = True
         if conf.indirect_pref_decisions[addr].clobber_reg == "None":
@@ -405,7 +411,7 @@ def print_indirect_prefetch_decisions(conf):
                                                       conf.indirect_pref_decisions[addr].score)
 
 
-def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind=False, stride=0):
+def analyze_pointer_prefetch(pointer_update_addr_dict, prefetch_decisions, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind=False, stride=0):
 
     if not pointer_update_addr_dict:
         return
@@ -470,7 +476,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
     print >> sys.stderr,"delinq load addr: 0x%lx -- freq update pc: 0x%lx -- dominant update freq: %lf"%(delinq_load_addr, freq_update_pc, freq_update_pc_weight[1])
 
     if freq_update_pc in cfg.ins_tags_dict.keys():
-        if (cfg.ins_tags_dict[freq_update_pc] == "Read" or cfg.ins_tags_dict[freq_update_pc] == "Write" ) and freq_update_pc in cfg.ins_base_reg_dict.keys():
+        if freq_update_pc in cfg.ins_base_reg_dict.keys(): #(cfg.ins_tags_dict[freq_update_pc] == "Read" or cfg.ins_tags_dict[freq_update_pc] == "Write" ) and 
             
             mem_dis = cfg.ins_mem_dis_dict[freq_update_pc]
 
@@ -535,14 +541,26 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
                     print >> sys.stderr, "--nested object--"
 
             if is_ind:
-                updated_reg_id = cfg.ins_idx_reg_dict[freq_update_pc]
+                if freq_update_pc in cfg.ins_idx_reg_dict.keys():
+                    updated_reg_id = cfg.ins_idx_reg_dict[freq_update_pc]
+                else:
+                    updated_reg_id = cfg.ins_dst_regs_dict[freq_update_pc][0]
+                    
+                if freq_update_pc in prefetch_decisions.keys():
+                    mem_dis = stride * (prefetch_decisions[freq_update_pc].pd - 1)
+                if mem_dis == 0:
+                    mem_dis = stride
+
+                if updated_reg_id == 0:
+                    print >> sys.stderr, "%lx probably stack operation, no register updated\n"%(freq_update_pc)
+                    return
+
                 updated_reg = cfg.regs_dict[updated_reg_id]
                 score = cfg.ins_mem_scale_dict[freq_update_pc]
-                mem_dis = stride
 
             print >> sys.stderr, "%d>>>%lx:%d:%d"%(conf.resolved_count, delinq_load_addr, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
             print >> sys.stderr, ">>> %lx:%s:%s:%s:%d:%lx:%s:%d:%d <<<\n\n"%(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score)
-            
+
             conf.indirect_pref_decisions[delinq_load_addr] = PtrPrefParams(schedule_addr, pf_type, clobber_reg, base_reg, mem_dis, freq_update_pc, updated_reg, score, fwd_score, freq_delinq_loads_till_use, freq_delinq_loads_till_update)
 
 #        else:
@@ -554,7 +572,7 @@ def analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict,
 #        print"%d>>> %lx no tag found <<<"%(conf.resolved_count, freq_update_pc)
 
 
-def analyze_non_strided_delinq_loads(global_pc_smptrace_hist, prefetch_decisions, exec_file):
+def analyze_non_strided_delinq_loads(global_pc_smptrace_hist, global_pc_stride_hist, prefetch_decisions, exec_file, num_samples, avg_mem_latency):
 
     ins_src_regs_dict = {}
     ins_dst_regs_dict = {}
@@ -573,26 +591,68 @@ def analyze_non_strided_delinq_loads(global_pc_smptrace_hist, prefetch_decisions
 
     for delinq_load_addr in prefetch_decisions.keys():
         pref_param = prefetch_decisions[delinq_load_addr]
-        if pref_param.pf_type == "ptr":
+        if "ptr" in pref_param.pf_type:
             delinq_load_address_list.append(delinq_load_addr)
 
     delinq_load_address_list = sorted(delinq_load_address_list)
 
-    conf = Conf1(exec_file, delinq_load_address_list)
+    conf = Conf1(exec_file, delinq_load_address_list, num_samples, avg_mem_latency)
 
-    print >> sys.stderr, delinq_load_address_list
+    irr_list = []
+    print >> sys.stderr, "\nSample freq irregular accesses!\n"
+    for pc in delinq_load_address_list:
+        pc_smptrace_hist = global_pc_smptrace_hist[pc]
+        l3mr = prefetch_decisions[pc].l3_mr
+        l2mr = prefetch_decisions[pc].l2_mr
+        l1mr = prefetch_decisions[pc].l1_mr
+        sample_freq = float(len(pc_smptrace_hist.keys()))/float(num_samples)
+        score = float(sample_freq)*float(l3mr)
+        irr_list += [(pc, sample_freq, l3mr, l2mr, l1mr, score)]
+        
 
-    for delinq_load_addr in delinq_load_address_list:
+    sorted_irr_list = sorted(irr_list, key=operator.itemgetter(5), reverse=True)
+
+    trimmed_delinq_load_addr_list = []
+    count = 0
+
+
+    for tup in sorted_irr_list:
+        pc = tup[0]
+        sample_freq = tup[1]
+        l3mr = tup[2]
+        l2mr = tup[3] 
+        l1mr = tup[4] 
+        score = tup[5]
+        if count < 15:
+            trimmed_delinq_load_addr_list += [pc]
+        count = count + 1
+        pc_stride_hist = global_pc_stride_hist[pc]
+        sorted_x = sorted(pc_stride_hist.iteritems(), key=operator.itemgetter(1), reverse=True)
+        sample_count = sum([pair[1] for pair in sorted_x])
+        max_stride = sorted_x[0][0] 
+        max_stride_freq = float(sorted_x[0][1])/float(sample_count)
+
+        print >> sys.stderr, "\npc:%lx  freq:%lf  l3mr:%lf  l2mr:%lf  l1mr:%lf  score:%lf"%(pc, sample_freq, l3mr, l2mr, l1mr, score)
+
+
+    for delinq_load_addr in trimmed_delinq_load_addr_list: #delinq_load_address_list:
 
         cfg = disassm.get_func_disassm(conf.exec_file, delinq_load_addr)
 
         if not (cfg.ins_tags_dict[delinq_load_addr] == 'Read' or cfg.ins_tags_dict[delinq_load_addr] == 'Write'):
             continue
 
-        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop) = ins_trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, prefetch_decisions, cfg, conf)
+#        if float(len(global_pc_smptrace_hist[delinq_load_addr].keys()))/float(conf.num_samples) < 0.005:
+#            continue
 
-        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf)
-        
+        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, is_ind, stride) = ins_trace_ptr_nobj_analysis.detect_pointer_chasing(global_pc_smptrace_hist, global_pc_stride_hist, delinq_load_addr, None, cfg, conf)
+
+        analyze_pointer_prefetch(pointer_update_addr_dict, prefetch_decisions, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind, stride)
+
+#        (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop) = ins_trace_analysis.detect_pointer_chasing(global_pc_smptrace_hist, delinq_load_addr, prefetch_decisions, cfg, conf)
+
+#        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf)
+
         if delinq_load_addr in conf.indirect_pref_decisions:
             do_cost_benefit_analysis(cfg, conf, delinq_load_addr, prefetch_decisions)
         
@@ -633,8 +693,6 @@ def main():
         delinq_load_address_list = [delinq_load_addr]
 
     listing = os.listdir(conf.path)
-
-    print "building trace maps..."
 
     if not conf.num_samples is None:
 
@@ -693,9 +751,13 @@ def main():
         if not (cfg.ins_tags_dict[delinq_load_addr] == 'Read' or cfg.ins_tags_dict[delinq_load_addr] == 'Write'):
             continue
 
+        print >> sys.stderr, "Sample frequency %lx: %lf"%(delinq_load_addr, float(len(pc_smptrace_hist.keys()))/float(conf.num_samples))
+
         (pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, is_ind, stride) = ins_trace_ptr_nobj_analysis.detect_pointer_chasing(global_pc_smptrace_hist, global_pc_stride_hist, delinq_load_addr, None, cfg, conf)
 
-        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind, stride)
+#        analyze_pointer_prefetch(pointer_update_addr_dict, pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind, stride)
+
+        analyze_pointer_prefetch(pointer_update_addr_dict, [], pointer_update_time_dict, time_to_update_dict, delinq_load_addr, delinq_loads_till_update, delinq_loads_till_use, all_BBs_in_loop, cfg, conf, is_ind, stride)
 
     decide_prefetch_schedules(cfg, conf)
     print_indirect_prefetch_decisions(conf)

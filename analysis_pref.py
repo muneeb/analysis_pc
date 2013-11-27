@@ -25,9 +25,10 @@ __version__ = "$Revision$"
 
 class PrefParams:
 
-    def __init__(self, delinq_load_addr, pf_type, l1_mr, l2_mr, l3_mr):
+    def __init__(self, delinq_load_addr, pf_type, pd, l1_mr, l2_mr, l3_mr):
         self.delinq_load_addr = delinq_load_addr
         self.pf_type = pf_type
+        self.pd = pd
         self.l1_mr = l1_mr
         self.l2_mr = l2_mr
         self.l3_mr = l3_mr
@@ -97,6 +98,11 @@ class Conf:
                           dest="detailed_modeling",
                           help="Use detailed modeling")
 
+        parser.add_option("--report-delinq-loads-only",
+                          type="int", default="0",
+                          dest="report_delinq_loads_only",
+                          help="Use detailed modeling")
+
         parser.add_option("--all-delinq-loads",
                           type="int", default="0",
                           dest="all_delinq_loads",
@@ -157,6 +163,7 @@ class Conf:
         self.detailed_modeling = opts.detailed_modeling
         self.prefetch_decisions = {}
         self.exec_file = opts.exec_file
+        self.report_delinq_loads_only = opts.report_delinq_loads_only
 
     def help_filters(self, option, opt, value, parser):
         sample_filter.usage()
@@ -323,8 +330,7 @@ def prefetchable_pcs(burst_hists, conf):
 
     for (pc, sdist_hist) in pc_sdist_hist.items():
     
-        #considering L1$ size == 64kB (1024 cache lines)
-        if max(sdist_hist.keys()) > (conf.l1_size * 1024 / conf.line_size):
+        if max(sdist_hist.keys()) > (float(conf.l1_size * 1024) / float(conf.line_size)):
 
             #in case of a dangling pointer, there "may" be no entry in pc_recur_hist 
             if pc in pc_recur_hist:
@@ -337,7 +343,7 @@ def prefetchable_pcs(burst_hists, conf):
                     total_recur_count = sum(pc_recur_hist[pc].itervalues()) 
                     max_recur_freq = float(float(pc_recur_hist[pc][max_recur])/float(total_recur_count) )
 
-                    if max_recur_freq < 0.2:
+                    if max_recur_freq < 0.5:
                         pref_pcs.append(pc)
             else:
                 pref_pcs.append(pc)
@@ -476,9 +482,9 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
 
         sdist_list = global_pc_fwd_sdist_hist[p_pc].keys()
             
-        non_l1_sdist_list = filter(lambda x: x > (conf.l1_size), sdist_list)
+        non_l1_sdist_list = filter(lambda x: x > (float(conf.l1_size * 1024) / float(conf.line_size)), sdist_list)
         
-        if len(non_l1_sdist_list) > 0 and min(non_l1_sdist_list) < (conf.l3_size * 1024 / conf.line_size):
+        if len(non_l1_sdist_list) > 0 and min(non_l1_sdist_list) < (float(conf.l3_size * 1024 )/ float(conf.line_size)):
             return False
         
         checked_pcs.append(p_pc)
@@ -583,6 +589,9 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                 if pd == 0:
                     pd = 1 
                         
+                if stride < 0:
+                    pd = -1 * pd
+
                 sd = cache_line_size * pd
                 stride = cache_line_size
                 
@@ -594,6 +603,9 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
                 if pd == 0:
                     pd = 1 
+
+                if stride < 0:
+                    pd = -1 * pd
 
                 sd = stride * pd
             
@@ -621,8 +633,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         if not pc in reduced_full_pc_stride_hist.keys():
             continue
 
-        if not pc in global_pc_corr_hist.keys():
-            continue
+#        if not pc in global_pc_corr_hist.keys():
+#            continue
 
         pf_type = 'pf'
 
@@ -663,11 +675,22 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         l3_mr = float(float(l3_misses)/float(total_accesses)) 
 
         if conf.detailed_modeling == 1:
-            if l3_mr < 0.007:
-               if l2_mr < 0.03:
-                   if l1_mr < 0.1:
-                       continue
+#            if l3_mr < 0.005:
+#               if l2_mr < 0.03:
+#                   if l1_mr < 0.1:
+#                       continue
+            cb_score = float(1)/float(avg_mem_latency)
+            if l1_mr < cb_score and l3_mr < 0.005:
+                print >> sys.stderr, "\ncb-ignored %lx" % (pc)
+                print >> sys.stderr, "L1 MR %lf%%, L2 MR %lf%%, L3_MR %lf%%, -- %s: dataset size: %lf MB"%(l1_mr, l2_mr, l3_mr, hex(pc), float(max_sdist * conf.line_size / (1024*1024)))
+                continue
 
+            if l1_mr >= cb_score and conf.report_delinq_loads_only == 1:
+                print pc, l1_mr
+
+            if conf.report_delinq_loads_only == 1:
+                continue
+            
 
         if analysis_type == "aggr" and pc in global_pc_fwd_sdist_hist.keys():
 
@@ -703,25 +726,58 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         print >> sys.stderr,"\n\n"
         print >> sys.stderr,"Stride %lu"%(pc)
-#        print >> sys.stderr, full_pc_stride_hist[pc]
-#        print >> sys.stderr,"\n\n\n"
         
+        max_stride_region_freq = float(float(max_stride_region_count) / float(total_stride_count))
 
-        if float(float(max_stride_region_count) / float(total_stride_count)) < float(0.6):
+        if max_stride_region_freq < float(0.7):
             remove_pcs.append(pc)
 
-            if l1_mr >= 0.005 and bool(conf.all_delinq_loads):
+            if conf.all_delinq_loads:
                 if isnontemporal:
                     pf_type = "ptrnta"
-#                    print"%ld:ptrnta:1"%(pc)
                 else:
                     pf_type = "ptr"
-#                    print"%ld:ptr:1"%(pc)
-            print >> sys.stderr, "irrgeular strided load (L1 MR %lf%%, L2 MR %lf%%, L3_MR %lf%%, max stride region ratio %lf -- %s): dataset size: %lf MB"%(l1_mr, l2_mr, l3_mr, 
-                    float(float(max_stride_region_count) / float(total_stride_count)), hex(pc),  float(max_sdist * conf.line_size / (1024*1024)) )
+            print >> sys.stderr, "irregular strided load (L1 MR %lf%%, L2 MR %lf%%, L3_MR %lf%%, max stride region ratio %lf -- %s): dataset size: %lf MB"%(l1_mr, l2_mr, l3_mr, 
+                    max_stride_region_freq, hex(pc),  float(max_sdist * conf.line_size / (1024*1024)) )
+
+            print >> sys.stderr, "pc: %lx   freq-stride: %ld   freq-stride-region: %ld   prob: %lf"%(pc, max_stride, max_stride_region, max_stride_region_freq)
+
+            more_stride_offsets = ""
+            for i in range (1, len(sorted_x)-1):
+                if i > 5:
+                    continue
+                stride = sorted_x[i][0] 
+                count = sorted_x[i][1]
+
+                stride_region_count = 0
+                stride_region = math.floor(float(stride) / float(cache_line_size))
+                    
+                if stride_region == 0:
+                    continue
+
+                for s,c in full_pc_stride_hist[pc].items():
+            
+                    if math.floor(float(s) / float(cache_line_size)) == stride_region:
+                        stride_region_count += c
+                
+                stride_region_freq = float(float(stride_region_count) / float(total_stride_count))
+        
+                print >> sys.stderr, "pc: 0x%lx   freq-stride: %ld   freq-stride-region: %ld   prob: %lf"%(pc, stride, stride_region, stride_region_freq)
+
+
+                if stride_region_freq > 0.1 and stride_region != 0:
+                    stride_offset = int(stride_region * cache_line_size)
+                    stride_offsets = more_stride_offsets.split(",")
+
+                    if not str(stride_offset) in stride_offsets:
+                        more_stride_offsets = more_stride_offsets+","+str(stride_offset)
+                    
+
+            if  max_stride_region_freq > 0.1 and max_stride_region != 0:
+                print "0x%lx:adj:%ld%s"%(pc, max_stride_region * cache_line_size, more_stride_offsets)
 
             #add prefetch decision to central data structure
-            pref_param = PrefParams(pc, pf_type, l1_mr, l2_mr, l3_mr)
+            pref_param = PrefParams(pc, pf_type, 0, l1_mr, l2_mr, l3_mr)
             conf.prefetch_decisions[pc] = pref_param
 
             continue
@@ -806,6 +862,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             if pd == 0:
                 pd = 1 
 
+            if stride < 0:
+                pd = -1 * pd
 
             stride = cache_line_size
 
@@ -829,6 +887,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             if pd == 0:
                 pd = 1 
 
+            if stride < 0:
+                pd = -1 * pd
 
             sd = stride * pd
 
@@ -846,9 +906,9 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         print >> sys.stderr, total_count
         print >> sys.stderr, stride, pd, sd, avg_iters
         print >> sys.stderr, "\n\n"
-        print >> sys.stderr, recur_freq
+#        print >> sys.stderr, recur_freq
 
-        print >> sys.stderr, "\n\n\n"
+#        print >> sys.stderr, "\n\n\n"
                 
 #        print >> sys.stderr, full_pc_stride_hist[pc]
 
@@ -859,7 +919,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 #                print >> sys.stderr, "stride doubled for non temporal access (load from DRAM)"
     
         #add prefetch decision to central data structure
-        pref_param = PrefParams(pc, pf_type, l1_mr, l2_mr, l3_mr)
+        pref_param = PrefParams(pc, pf_type, pd, l1_mr, l2_mr, l3_mr)
         conf.prefetch_decisions[pc] = pref_param
         
 #        if total_count > 50:
@@ -966,7 +1026,7 @@ def main():
 
     generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf)
 
-    full_pc_stride_hist.clear()
+#    full_pc_stride_hist.clear()
 
     global_pc_fwd_sdist_hist.clear()
 
@@ -978,7 +1038,12 @@ def main():
     
     gc.collect()
 
-    redirect_analysis.analyze_non_strided_delinq_loads(global_pc_smptrace_hist, conf.prefetch_decisions, conf.exec_file)
+    for pc in conf.prefetch_decisions.keys():
+        pref_param = conf.prefetch_decisions[pc]
+        print >> sys.stderr, "pc: %lx"%(pc)
+        print >> sys.stderr, "pf_type "+pref_param.pf_type
+
+    redirect_analysis.analyze_non_strided_delinq_loads(global_pc_smptrace_hist, full_pc_stride_hist, conf.prefetch_decisions, conf.exec_file, conf.num_samples, conf.memory_latency)
 
 
 if __name__ == "__main__":

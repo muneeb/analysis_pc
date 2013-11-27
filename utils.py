@@ -158,7 +158,7 @@ def usf_read_events(usf_file, line_size, filter=filter_true):
             addto_pc_stride_hist(pc_stride_hist, event.begin.pc, stride)
             addto_pc_time_hist(pc_time_hist, event.begin.pc, repeat_time)
         elif isinstance(event, pyusf.Smptrace):
-            smptrace_array = numpy.ndarray( (pyusf.SMPTRACE_LEN,), dtype= numpy.uint64, buffer=event.ins_trace)
+            smptrace_array = numpy.ndarray( (pyusf.SMP_INS_TRACE_LEN,), dtype= numpy.uint64, buffer=event.ins_trace)
             smptrace = smptrace_array.tolist()
             addto_pc_smptrace_hist(pc_smptrace_hist, event.begin.pc, event.begin.time, smptrace)
         else:

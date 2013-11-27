@@ -1,4 +1,4 @@
-#!/usr/bin/python
+2#!/usr/bin/python
 
 import string
 import sys
@@ -161,7 +161,7 @@ def pointer_analysis_with_trace_hints(track_reg, delinq_load_addr, BB_addr, trac
             BBs_in_loop.append(BB_addr)
 
         for pc_in_BB in reversed_BB_addr_range:
-
+            
             tag = None
             if pc_in_BB in cfg.ins_tags_dict:
                 tag = cfg.ins_tags_dict[pc_in_BB]

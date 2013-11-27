@@ -101,7 +101,10 @@ def read_delinq_pcs(conf):
 
         for line in infile:
             line_tokens = line.split(':')
-            dec_pc = long(line_tokens[0])
+            try:
+                dec_pc = long(line_tokens[0])
+            except ValueError, e:
+                dec_pc = long(line_tokens[0], 16)
             delinq_load_pcs.append(dec_pc)
 
     except IOError, e:
