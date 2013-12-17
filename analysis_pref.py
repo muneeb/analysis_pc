@@ -289,7 +289,7 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
 
             for (rdist, count) in rdist_hist.items():
                 sd  = int(round(r2s[rdist]))
-                pc_sdist_hist[pc][sd] = pc_sdist_hist.get(sd, 0) + count
+                pc_sdist_hist[pc][sd] = pc_sdist_hist[pc].get(sd, 0) + count
 
         for (pc, fwd_rdist_hist) in pc_fwd_rdist_hist.items():
 
@@ -298,7 +298,7 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
 
             for (rdist, count) in fwd_rdist_hist.items():
                 sd  = int(round(r2s[rdist]))
-                pc_fwd_sdist_hist[pc][sd] = pc_fwd_sdist_hist.get(sd, 0) + count
+                pc_fwd_sdist_hist[pc][sd] = pc_fwd_sdist_hist[pc].get(sd, 0) + count
 
         for (pc, time_hist) in pc_time_hist.items():
 
@@ -681,7 +681,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 #                       continue
             cb_score = float(1)/float(avg_mem_latency)
             if l1_mr < cb_score and l3_mr < 0.005:
-                print >> sys.stderr, "\ncb-ignored %lx" % (pc)
+                print >> sys.stderr, "\ncb-ignored pc-hex:%lx   pc:%ld" % (pc, pc)
                 print >> sys.stderr, "L1 MR %lf%%, L2 MR %lf%%, L3_MR %lf%%, -- %s: dataset size: %lf MB"%(l1_mr, l2_mr, l3_mr, hex(pc), float(max_sdist * conf.line_size / (1024*1024)))
                 continue
 
