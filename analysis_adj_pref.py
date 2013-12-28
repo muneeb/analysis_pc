@@ -275,7 +275,7 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
 
             for (rdist, count) in rdist_hist.items():
                 sd  = int(round(r2s[rdist]))
-                pc_sdist_hist[pc][sd] = pc_sdist_hist.get(sd, 0) + count
+                pc_sdist_hist[pc][sd] = pc_sdist_hist[pc].get(sd, 0) + count
 
         for (pc, fwd_rdist_hist) in pc_fwd_rdist_hist.items():
 
@@ -284,7 +284,7 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
 
             for (rdist, count) in fwd_rdist_hist.items():
                 sd  = int(round(r2s[rdist]))
-                pc_fwd_sdist_hist[pc][sd] = pc_fwd_sdist_hist.get(sd, 0) + count
+                pc_fwd_sdist_hist[pc][sd] = pc_fwd_sdist_hist[pc].get(sd, 0) + count
 
         for (pc, time_hist) in pc_time_hist.items():
 
@@ -390,14 +390,15 @@ def build_global_pc_fwd_sdist_recur_hist(global_pc_fwd_sdist_hist, global_pc_rec
 
 def build_global_pc_adj_mr_hist(r2s, conf, global_pc_adjp1_mr_hist, pc_adjp1_cl_rdist_hist, global_pc_adjm1_mr_hist, pc_adjm1_cl_rdist_hist, pc_rdist_hist):
     
-    ref_count = 0
-    for (pc, rdist_hist) in pc_rdist_hist.items():
-        ref_count += sum(rdist_hist.values())
+#    ref_count = 0
+#    for (pc, rdist_hist) in pc_rdist_hist.items():
+#        ref_count += sum(rdist_hist.values())
 
     for (pc, adjp1_cl_rdist_hist) in pc_adjp1_cl_rdist_hist.items():
         
         sdist_hist = {}
-            
+        ref_count = 0
+        
         for (rdist, count) in adjp1_cl_rdist_hist.items():
     
             if not rdist in r2s:
@@ -409,7 +410,9 @@ def build_global_pc_adj_mr_hist(r2s, conf, global_pc_adjp1_mr_hist, pc_adjp1_cl_
             if sd in sdist_hist.keys():
                 sdist_hist[sd] = sdist_hist.get(sd, 0) + count
             else:
-                sdist_hist[sd] = 1
+                sdist_hist[sd] = count
+
+            ref_count += count
 
         [adjp1_l1mr, adjp1_l2mr, adjp1_l3mr] = get_pc_adj_miss_ratio(pc, sdist_hist, ref_count, conf)
 
@@ -428,7 +431,8 @@ def build_global_pc_adj_mr_hist(r2s, conf, global_pc_adjp1_mr_hist, pc_adjp1_cl_
     for (pc, adjm1_cl_rdist_hist) in pc_adjm1_cl_rdist_hist.items():
         
         sdist_hist = {}
-            
+        ref_count = 0
+
         for (rdist, count) in adjm1_cl_rdist_hist.items():
     
             if not rdist in r2s:
@@ -440,7 +444,9 @@ def build_global_pc_adj_mr_hist(r2s, conf, global_pc_adjp1_mr_hist, pc_adjp1_cl_
             if sd in sdist_hist.keys():
                 sdist_hist[sd] = sdist_hist.get(sd, 0) + count
             else:
-                sdist_hist[sd] = 1
+                sdist_hist[sd] = count
+
+            ref_count += count
 
         [adjm1_l1mr, adjm1_l2mr, adjm1_l3mr] = get_pc_adj_miss_ratio(pc, sdist_hist, ref_count, conf)
 
@@ -614,116 +620,6 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
     reduced_full_pc_stride_hist = reduce_stride_hist(full_pc_stride_hist)
 
-    if conf.stride_only == 1:
-
-        pref_pc_sd_hist = {}
-        
-
-        for pc in reduced_full_pc_stride_hist.keys():
-
-            unrolled_loop_mop = 0
-
-            sorted_x = sorted(reduced_full_pc_stride_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
-
-            max_stride = sorted_x[0][0] 
-            max_count = sorted_x[0][1]
-
-            total_stride_count = sum(full_pc_stride_hist[pc].itervalues())
-
-            max_stride_region_count = 0
-            max_stride_region = math.floor(float(max_stride) / float(32))
-                    
-            for s,c in full_pc_stride_hist[pc].items():
-            
-                if math.floor(float(s) / float(32)) == max_stride_region:
-                    max_stride_region_count += c
-
-            if float(float(max_count) / float(total_stride_count)) < float(0.7):
-                continue
-            
-            stride = max_stride
-
-            sorted_x = sorted(global_pc_recur_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
-
-            weight = 0
-            avg_r = 0
-
-            for r, c in sorted_x:
-                avg_r += int(r) * int(c)
-                weight += int(c)
-
-            avg_r = round(float(avg_r)/ float(weight))
-
-            if avg_r == 0:
-                avg_r = 1
-
-            recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) 
-            recur_freq_thr = 200 #int(recur_freq[0])/6
-            recur_freq_out_loop = filter(lambda y: y > recur_freq_thr, recur_freq)
-            recur_freq_in_loop = filter(lambda y: y <= recur_freq_thr, recur_freq)
-
-            loop_recur_freq = sum(recur_freq_in_loop)
-            loop_reach_freq = sum(recur_freq_out_loop)
-
-            if loop_reach_freq == 0:
-                loop_reach_freq = 1
- 
-            avg_iters = float(float(loop_recur_freq)/float(loop_reach_freq))
-                
-            if avg_iters == 0:
-                avg_iters = 1
-
-            if abs(stride) < cache_line_size:
-                    
-                no_iters = int(round(float(cache_line_size) / float(abs(stride)) )) - 1
-
-                if no_iters == 0:
-                    no_iters = 1
-
-                pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters ))
-                    
-                if pd == 0:
-                    pd = 1 
-                        
-                if stride < 0:
-                    pd = -1 * pd
-
-                sd = cache_line_size * pd
-                stride = cache_line_size
-                
-            else:
-            
-                no_iters = 1
-
-                pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters))
-
-                if pd == 0:
-                    pd = 1 
-
-                if stride < 0:
-                    pd = -1 * pd
-
-                sd = stride * pd
-            
-#           for pc_x in pref_pc_sd_hist.keys():
-#                if abs(pc_x - pc) <= 50  and pref_pc_sd_hist[pc_x] == sd:
-                    #loop unrolling possibility
-#                    print >> sys.stderr, pc_x, pc, pref_pc_sd_hist[pc_x], sd
-#                    unrolled_loop_mop = 1
-#                    break
-
-            pref_pc_sd_hist[pc] = sd
-
-            if conf.detailed_modeling == 1:
-                if (avg_iters/2) < pd:
-                    pd = math.ceil(float(avg_iters)/float(2)) 
-                    sd = stride * pd 
-
-#            if unrolled_loop_mop == 0:
-            print"%ld:pf:%d"%(pc, int(sd))
-
-        return
-
     for pc in global_prefetchable_pcs:
 
         if not pc in reduced_full_pc_stride_hist.keys():
@@ -838,7 +734,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         max_stride_region_freq = float(float(max_stride_region_count) / float(total_stride_count))
 
-        if max_stride_region_freq < float(0.6):
+        if max_stride_region_freq < float(0.7):
             remove_pcs.append(pc)
 
             if conf.all_delinq_loads:
@@ -853,17 +749,21 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             more_stride_offsets = ""
             
-            if adjp1_l1mr > 0:
+            cb_factor = 20 #float(1/avg_mem_latency)
+
+            print >> sys.stderr, "cb_factor %lf"%(cb_factor)
+
+            if adjp1_l1mr > cb_factor:
                 more_stride_offsets = more_stride_offsets+",64"
-            if adjm1_l1mr > 0:
+            if adjm1_l1mr > cb_factor:
                 more_stride_offsets = more_stride_offsets+",-64"
 
             max_stride_region_offset = int(max_stride_region * cache_line_size)
 
 
             stride_offsets = more_stride_offsets.split(",")
-            if max_stride_region < 3 and max_stride_region > -3 and max_stride_region_freq > 0.1 and max_stride_region != 0 and str(max_stride_region_offset) not in stride_offsets:
-                more_stride_offsets = str(max_stride_region_offset)+more_stride_offsets
+#            if max_stride_region < 3 and max_stride_region > -3 and max_stride_region_freq > 0.1 and max_stride_region != 0 and str(max_stride_region_offset) not in stride_offsets:
+#                more_stride_offsets = str(max_stride_region_offset)+more_stride_offsets
 
             for i in range (1, len(sorted_x)-1):
                 if i > 5:
@@ -887,12 +787,12 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                 print >> sys.stderr, "pc: 0x%lx   freq-stride: %ld   freq-stride-region: %ld   prob: %lf"%(pc, stride, stride_region, stride_region_freq)
 
 
-                if stride_region_freq > 0.1 and stride_region != 0:
-                    stride_offset = int(stride_region * cache_line_size)
-                    stride_offsets = more_stride_offsets.split(",")
+#                if stride_region_freq > 0.1 and stride_region != 0:
+#                    stride_offset = int(stride_region * cache_line_size)
+#                    stride_offsets = more_stride_offsets.split(",")
 
-                    if not str(stride_offset) in stride_offsets and stride_offset != max_stride_region_offset and stride_offset in [-128,-64,64,128]:
-                        more_stride_offsets = more_stride_offsets+","+str(stride_offset)
+#                    if not str(stride_offset) in stride_offsets and stride_offset != max_stride_region_offset and stride_offset in [-128,-64,64,128]:
+#                        more_stride_offsets = more_stride_offsets+","+str(stride_offset)
                     
             if more_stride_offsets:
                 if more_stride_offsets[0] == ',':
@@ -913,20 +813,20 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         stride = max_stride
 
-        if (abs(stride) * max_count) <= cache_line_size:
+#        if (abs(stride) * max_count) <= cache_line_size:
 
-            adj_pref_off=""
-            if adjp1_l1mr > 0:
-                adj_pref_off = "64"
-            if adjm1_l1mr > 0:
-                if adj_pref_off:
-                    adj_pref_off = adj_pref_off +","
-                    adj_pref_off = adj_pref_off +"-64"
+#            adj_pref_off=""
+#            if adjp1_l1mr > 0:
+#                adj_pref_off = "64"
+#            if adjm1_l1mr > 0:
+#                if adj_pref_off:
+#                    adj_pref_off = adj_pref_off +","
+#                    adj_pref_off = adj_pref_off +"-64"
 
-            if len(adj_pref_off) > 1:
-                print"0x%lx:adj:%s"%(pc, adj_pref_off)
+#            if len(adj_pref_off) > 1:
+#                print"0x%lx:adj:%s"%(pc, adj_pref_off)
 
-            continue
+#            continue
 
         
 #        if max(global_pc_sdist_hist[pc].keys()) > (l3_size * 1024 / cache_line_size):

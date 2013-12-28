@@ -204,7 +204,7 @@ def compute_delinq_load_identification_coverage(pc_mr_hist, delinq_load_pcs, pc_
             p = p + pc_miss_hist[pc] + pc_hit_hist[pc]
 #        else:
 #            print >> sys.stderr, "skipped"
-
+    print "%lx"%(pc)
     for pc in delinq_load_pcs:
         if pc in pc_mr_hist.keys():
             pnc = pnc + pc_miss_hist[pc] + pc_hit_hist[pc]

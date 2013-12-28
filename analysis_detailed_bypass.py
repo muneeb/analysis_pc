@@ -255,7 +255,7 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
 
             for (rdist, count) in rdist_hist.items():
                 sd  = int(round(r2s[rdist]))
-                pc_sdist_hist[pc][sd] = pc_sdist_hist.get(sd, 0) + count
+                pc_sdist_hist[pc][sd] = pc_sdist_hist[pc].get(sd, 0) + count
 
         for (pc, fwd_rdist_hist) in pc_fwd_rdist_hist.items():
 
@@ -264,7 +264,7 @@ def generate_per_pc_sdist_recurrence_hist(burst_hists):
 
             for (rdist, count) in fwd_rdist_hist.items():
                 sd  = int(round(r2s[rdist]))
-                pc_fwd_sdist_hist[pc][sd] = pc_fwd_sdist_hist.get(sd, 0) + count
+                pc_fwd_sdist_hist[pc][sd] = pc_fwd_sdist_hist[pc].get(sd, 0) + count
 
     return [pc_sdist_hist, pc_fwd_sdist_hist]
 
@@ -438,10 +438,10 @@ def analyze_temporal_locality(pc, global_pc_fwd_sdist_hist, conf):
     l3_sdist_list = filter(lambda x: x > l2_sdist_size and x <= l3_sdist_size, fwd_sdist_list)
 
     if len(l2_sdist_list) == 0:
-        bypass_decision = bypass_decision + 1 # bypass l2
+        bypass_decision = bypass_decision + 2 # bypass l2
 
     if len(l3_sdist_list) == 0:
-        bypass_decision = bypass_decision + 2 # bypass l2
+        bypass_decision = bypass_decision + 4 # bypass l2
 
     return bypass_decision
 
@@ -496,7 +496,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         bypass_decision = analyze_temporal_locality(pc, global_pc_fwd_sdist_hist, conf)
 
         if bypass_decision > 0:
-            print "0x%lx:%ld"%(pc, bypass_decision)
+            print "%ld:%ld"%(pc, bypass_decision)
         
 
 def main():
