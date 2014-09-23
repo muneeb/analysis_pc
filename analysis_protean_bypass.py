@@ -89,9 +89,14 @@ class Conf:
                           help="L2 size in kilobytes (KB) ")        
 
         parser.add_option("--l3-size",
-                          type="int", default="6144",
+                          type="int", default="8192",
                           dest="l3_size",
-                          help="L3 size in kilobytes (KB) ")  
+                          help="L3 size in kilobytes (KB) ")
+                          
+        parser.add_option("--nta-l3-size",
+                          type="int", default="8192",
+                          dest="nta_l3_size",
+                          help="L3 size in kilobytes (KB) when NTA should be enabled")
         
         parser.add_option("--detailed-modeling",
                           type="int", default="0",
@@ -140,11 +145,16 @@ class Conf:
                   
         parser.add_option("--nta-policy",
                             type="int", default="0",
-                            dest="per_instr_nta_analysis",
-                            help="Generate per-instruction nta analysis")
+                            dest="nta_policy",
+                            help="NTA policy")
+                            
+        parser.add_option("--no-nta-on-data-reuse",
+                          type="int", default="1",
+                          dest="no_nta_on_reuse",
+                          help="Deter NTA on data reuse from specified --nta-l3-size")
 
         parser.add_option("--help-nta-policy",
-                          action="callback", callback=self.help_filters,
+                          action="callback", callback=self.help_nta_policies,
                           help="Display types of NTA policies available")
 
         parser.add_option("--stride-only-analysis",
@@ -191,9 +201,16 @@ class Conf:
         self.per_instr_nta_analysis = opts.per_instr_nta_analysis
         self.outfile_pref = opts.outfile_pref
         self.outfile_perinsmr = opts.outfile_perinsmr
+        self.per_instr_nta_analysis = opts.per_instr_nta_analysis
+        self.nta_l3_size = opts.nta_l3_size
+        self.no_nta_on_reuse = opts.no_nta_on_reuse
+        self.nta_policy = opts.nta_policy
 
-    def help_filters(self, option, opt, value, parser):
-        sample_filter.usage()
+    def help_nta_policies(self, option, opt, value, parser):
+        print "There are different policies depending on how you wish to configure cache bypassing"
+        print "0: Most conservative (cautious) policy. Proposes NTA only when they are useful."
+        print "1: In addition to policy 0 also proposes NTA for the specified nta_l3_size for Memory instructions with low frequency."
+        print "2: In addition to policy 1 also proposes NTA for the specified nta_l3_size for Memory instructions even with high frequency."
         sys.exit(0)
 
 def pow2(x):
@@ -522,7 +539,7 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
     
     return True
 
-def per_instr_nontemporal_analysis(pc, global_pc_fwd_sdist_hist, outfile_perinsmr, conf):
+def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, global_pc_fwd_sdist_hist, outfile_perinsmr, conf):
 
     total_accesses = sum(global_pc_fwd_sdist_hist[pc].values())
 
@@ -542,25 +559,41 @@ def per_instr_nontemporal_analysis(pc, global_pc_fwd_sdist_hist, outfile_perinsm
     l2_fwd_mr = float(float(l2_fwd_misses)/float(total_accesses))
     l3_fwd_mr = float(float(l3_fwd_misses)/float(total_accesses))
 
-#    l3_detailed_miss_dict = {}
-
+    #l3_detailed_miss_dict = {}
+    
+    #In case not found, nta_l3_size is set to the size of the LLC
+    nta_l3_size_fwd_mr = l3_fwd_mr
 
     if l1_fwd_mr > 0.001:
         outfile_perinsmr.write("#Cache-size(KB), data stream future-miss-ratio\n")
-        outfile_perinsmr.write("%d: %lf pc: 0x%lx\n"%(conf.l1_size,l1_fwd_mr, pc))
-        outfile_perinsmr.write("%d: %lf\n"%(conf.l2_size,l2_fwd_mr))
+        outfile_perinsmr.write("%d: %lf pc: 0x%lx\n pc-freq: %lf\n"%(conf.l1_size,l1_fwd_mr, pc, pc_freq))
+        outfile_perinsmr.write("** %d: %lf\n"%(conf.l2_size,l2_fwd_mr))
         for l3_part in range(1024, conf.l3_size, 1024):
             l3part_miss_sdist_list = filter(lambda (x,y): x > float(l3_part * 1024 / conf.line_size), fwd_sdist_list)
             l3part_misses = sum(map(lambda (x,y): y, l3part_miss_sdist_list))
             l3part_mr = float(float(l3part_misses)/float(total_accesses))
-        #   l3_detailed_miss_dict[l3_part] = l3part_mr
+            #l3_detailed_miss_dict[l3_part] = l3part_mr
+        
+            if conf.nta_l3_size == l3_part:
+                nta_l3_size_fwd_mr = l3part_mr
+                outfile_perinsmr.write("** ")
         
             outfile_perinsmr.write("%d: %lf\n"%(l3_part, l3part_mr))
 
         outfile_perinsmr.write("%d: %lf\n\n"%(conf.l3_size,l3_fwd_mr))
 
+        if conf.nta_policy > 0 and not isnontemporal:
+        
+            # when you don't care about reuse from the LLC
+            if nta_l3_size_fwd_mr >= 0.001 and conf.no_nta_on_reuse == 0:
+                print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
+                return 'nta'
+            # when care about reuse from the LLC
+            elif (l2_fwd_mr - nta_l3_size_fwd_mr) <= 0.001:
+                print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
+                return 'nta'
 
-
+    return 'pf'
 
 def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf):
 
@@ -579,6 +612,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     l3_size = conf.l3_size
     l2_size = conf.l2_size
     l1_size = conf.l1_size
+
+    total_sampled_accesses = sum(map(lambda x: sum(global_pc_sdist_hist[x].values()), global_pc_sdist_hist.keys()))
 
     avg_mem_latency = memory_latency
 
@@ -736,9 +771,6 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         l2_mr = float(float(l2_misses)/float(total_accesses)) 
         l3_mr = float(float(l3_misses)/float(total_accesses))
 
-        if conf.per_instr_nta_analysis == 1:
-            per_instr_nontemporal_analysis(pc, global_pc_fwd_sdist_hist, outfile_perinsmr, conf)
-
 
         if conf.detailed_modeling == 1:
             
@@ -753,7 +785,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             if conf.report_delinq_loads_only == 1:
                 continue
-            
+        
+        isnontemporal = False
 
         if analysis_type == "aggr" and pc in global_pc_fwd_sdist_hist.keys():
 
@@ -765,11 +798,17 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                 pf_type = 'nta'
                 isnontemporal = True
         
-        if analysis_type == "cons":
-            isnontemporal = False
+        if analysis_type == "cons" and conf.nta_policy == 0:
             isnontemporal = is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf)
             if isnontemporal:
                 pf_type = 'nta'
+
+        if conf.per_instr_nta_analysis == 1:
+                
+            pc_freq = round(float(total_accesses)/float(total_sampled_accesses),3)
+            
+            pf_type = per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, global_pc_fwd_sdist_hist, outfile_perinsmr, conf)
+
 
 
         sorted_x = sorted(reduced_full_pc_stride_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
