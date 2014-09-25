@@ -539,7 +539,7 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
     
     return True
 
-def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, global_pc_fwd_sdist_hist, outfile_perinsmr, conf):
+def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_accesses, pc_fwd_mr_dict, pc_fwd_l3_reuse_freq_dict, global_pc_fwd_sdist_hist, conf):
 
     total_accesses = sum(global_pc_fwd_sdist_hist[pc].values())
 
@@ -564,10 +564,15 @@ def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, global_pc_fwd_sdi
     #In case not found, nta_l3_size is set to the size of the LLC
     nta_l3_size_fwd_mr = l3_fwd_mr
 
+    l3_reuse_freq = round(float(l2_fwd_misses-l3_fwd_misses)/float(total_sampled_accesses),4)
+    
+    pc_fwd_l3_reuse_freq_dict[pc] = l3_reuse_freq
+
     if l1_fwd_mr > 0.001:
-        outfile_perinsmr.write("#Cache-size(KB), data stream future-miss-ratio\n")
-        outfile_perinsmr.write("%d: %lf pc: 0x%lx\n pc-freq: %lf\n"%(conf.l1_size,l1_fwd_mr, pc, pc_freq))
-        outfile_perinsmr.write("** %d: %lf\n"%(conf.l2_size,l2_fwd_mr))
+        #        outfile_perinsmr.write("#Cache-size(KB), data stream future-miss-ratio\n")
+        #outfile_perinsmr.write("%d %lf l3-reuse-freq %lf\n"%(conf.l1_size,l1_fwd_mr, l3_reuse_freq))
+        #outfile_perinsmr.write("%d %lf\n"%(conf.l2_size,l2_fwd_mr))
+        pc_fwd_mr_dict[pc] = {conf.l1_size: l1_fwd_mr, conf.l2_size: l2_fwd_mr, conf.l3_size: l3_fwd_mr}
         for l3_part in range(1024, conf.l3_size, 1024):
             l3part_miss_sdist_list = filter(lambda (x,y): x > float(l3_part * 1024 / conf.line_size), fwd_sdist_list)
             l3part_misses = sum(map(lambda (x,y): y, l3part_miss_sdist_list))
@@ -576,20 +581,28 @@ def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, global_pc_fwd_sdi
         
             if conf.nta_l3_size == l3_part:
                 nta_l3_size_fwd_mr = l3part_mr
-                outfile_perinsmr.write("** ")
+            #                outfile_perinsmr.write("** ")
         
-            outfile_perinsmr.write("%d: %lf\n"%(l3_part, l3part_mr))
+        #   outfile_perinsmr.write("%d %lf\n"%(l3_part, l3part_mr))
 
-        outfile_perinsmr.write("%d: %lf\n\n"%(conf.l3_size,l3_fwd_mr))
+            pc_fwd_mr_dict[pc][l3_part] = l3part_mr
+
+
+        pc_fwd_mr_dict[pc][conf.l3_size] = l3_fwd_mr
+        #outfile_perinsmr.write("%d %lf\n\n"%(conf.l3_size,l3_fwd_mr))
 
         if conf.nta_policy > 0 and not isnontemporal:
         
-            # when you don't care about reuse from the LLC
-            if nta_l3_size_fwd_mr >= 0.001 and conf.no_nta_on_reuse == 0:
+            # when you don't care about reuse from the LLC and the nta_policy is conservative
+            if nta_l3_size_fwd_mr >= 0.001 and conf.no_nta_on_reuse == 0 and conf.nta_policy == 1 and pc_freq < 0.005:
+                print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
+                return 'nta'
+            # when you don't care about reuse from the LLC and the nta_policy is aggressive
+            elif nta_l3_size_fwd_mr >= 0.001 and conf.no_nta_on_reuse == 0 and conf.nta_policy == 2:
                 print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
                 return 'nta'
             # when care about reuse from the LLC
-            elif (l2_fwd_mr - nta_l3_size_fwd_mr) <= 0.001:
+            elif (l2_fwd_mr - nta_l3_size_fwd_mr) <= 0.005:
                 print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
                 return 'nta'
 
@@ -598,10 +611,14 @@ def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, global_pc_fwd_sdi
 def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf):
 
     outfile_pref = open(conf.outfile_pref, 'w')
-    outfile_perinsmr =open(conf.outfile_perinsmr, 'w')
 
     cache_line_size = conf.line_size
 
+
+    pc_mr_dict = {}
+    pc_fwd_mr_dict = {}
+    pc_freq_dict = {}
+    pc_fwd_l3_reuse_freq_dict = {}
 
     analysis_type = conf.analysis_type
     cyc_per_mop = conf.cyc_per_mop
@@ -771,6 +788,16 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         l2_mr = float(float(l2_misses)/float(total_accesses)) 
         l3_mr = float(float(l3_misses)/float(total_accesses))
 
+        pc_freq = round(float(total_accesses)/float(total_sampled_accesses),4)
+        
+        pc_mr_dict[pc] = {conf.l1_size: l1_mr, conf.l2_size: l2_mr, conf.l3_size: l3_mr}
+        pc_freq_dict[pc] = pc_freq
+
+#        outfile_perinsmr.write("#Cache-size(KB), instruction's data miss-ratio\n")
+#        outfile_perinsmr.write("%d %lf pc: 0x%lx pc-freq: %lf\n"%(conf.l1_size, l1_mr, pc, pc_freq))
+#        outfile_perinsmr.write("%d %lf\n"%(conf.l2_size, l2_mr))
+#        outfile_perinsmr.write("%d %lf\n"%(conf.l3_size, l3_mr))
+
 
         if conf.detailed_modeling == 1:
             
@@ -804,12 +831,11 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                 pf_type = 'nta'
 
         if conf.per_instr_nta_analysis == 1:
-                
-            pc_freq = round(float(total_accesses)/float(total_sampled_accesses),3)
             
-            pf_type = per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, global_pc_fwd_sdist_hist, outfile_perinsmr, conf)
+            pf_type = per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_accesses, pc_fwd_mr_dict, pc_fwd_l3_reuse_freq_dict, global_pc_fwd_sdist_hist, conf)
 
-
+            if pf_type == 'nta':
+                isnontemporal = True
 
         sorted_x = sorted(reduced_full_pc_stride_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
 
@@ -834,8 +860,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         if max_stride_region_freq < float(0.7):
             remove_pcs.append(pc)
 
-            if conf.all_delinq_loads and isnontemporal:
-                print"0x%lx:%s:%d"%(pc, pf_type, 0)
+            if conf.all_delinq_loads == 1 and isnontemporal:
+                outfile_pref.write("0x%lx:%s:%d\n"%(pc, pf_type, 0))
 
             continue
  
@@ -972,6 +998,28 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 #        if total_count > 50:
         outfile_pref.write("0x%lx:%s:%d\n"%(pc, pf_type, int(sd)))
             #        print"0x%lx:%s:%d"%(pc, pf_type, int(sd))
+
+
+    outfile_perinsmr =open(conf.outfile_perinsmr, 'w')
+
+    sorted_pc_freq = sorted(pc_freq_dict.iteritems(), key=operator.itemgetter(1), reverse=True)
+
+    for (curr_pc, freq) in sorted_pc_freq:
+
+        if curr_pc in pc_fwd_mr_dict:
+            
+            outfile_perinsmr.write("#Cache-size(KB), instruction's miss-ratio\n")
+            outfile_perinsmr.write("%d %lf pc: 0x%lx pc-freq: %lf l3-reuse-freq: %lf\n"%(0, 0, curr_pc, freq, pc_fwd_l3_reuse_freq_dict[curr_pc]))
+            sorted_cs_mr = sorted(pc_mr_dict[curr_pc].iteritems(), key=operator.itemgetter(0))
+            for (cache_size, mr) in sorted_cs_mr:
+                outfile_perinsmr.write("%d %lf\n"%(cache_size, mr))
+
+            outfile_perinsmr.write("#Cache-size(KB), instruction's data reuse miss-ratio\n")
+            sorted_cs_mr = sorted(pc_fwd_mr_dict[curr_pc].iteritems(), key=operator.itemgetter(0))
+            for (cache_size, mr) in sorted_cs_mr:
+                outfile_perinsmr.write("%d %lf\n"%(cache_size, mr))
+
+            outfile_perinsmr.write("\n")
 
     outfile_pref.close()
     outfile_perinsmr.close()
