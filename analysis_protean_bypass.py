@@ -137,6 +137,11 @@ class Conf:
                           type="str", default="out.perinsmr",
                           dest="outfile_perinsmr",
                           help="Output file for prefetching decisions")
+                          
+        parser.add_option("--per-instr-nta-bw-out",
+                          type="str", default="out.perinsntabw",
+                          dest="outfile_perinsntabw",
+                          help="Output file for prefetching decisions")
 
         parser.add_option("--per-instr-nta-analysis",
                           type="int", default="0",
@@ -205,6 +210,7 @@ class Conf:
         self.nta_l3_size = opts.nta_l3_size
         self.no_nta_on_reuse = opts.no_nta_on_reuse
         self.nta_policy = opts.nta_policy
+        self.outfile_perinsntabw = opts.outfile_perinsntabw
 
     def help_nta_policies(self, option, opt, value, parser):
         print "There are different policies depending on how you wish to configure cache bypassing"
@@ -539,7 +545,7 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
     
     return True
 
-def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_accesses, pc_fwd_mr_dict, pc_fwd_l3_reuse_freq_dict, global_pc_fwd_sdist_hist, conf):
+def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_accesses, pc_fwd_mr_dict, pc_fwd_l2_l3_reuse_freq_dict, pc_fwd_l2_reuse_freq_dict, pc_fwd_l3_reuse_freq_dict, global_pc_fwd_sdist_hist, conf):
 
     total_accesses = sum(global_pc_fwd_sdist_hist[pc].values())
 
@@ -564,9 +570,13 @@ def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_acc
     #In case not found, nta_l3_size is set to the size of the LLC
     nta_l3_size_fwd_mr = l3_fwd_mr
 
+    l2_reuse_freq = round(float(l1_fwd_misses-l2_fwd_misses)/float(total_sampled_accesses),4)
     l3_reuse_freq = round(float(l2_fwd_misses-l3_fwd_misses)/float(total_sampled_accesses),4)
+    l2_l3_reuse_freq = round(float(l1_fwd_misses-l3_fwd_misses)/float(total_sampled_accesses),4)
     
+    pc_fwd_l2_l3_reuse_freq_dict[pc] = l2_l3_reuse_freq
     pc_fwd_l3_reuse_freq_dict[pc] = l3_reuse_freq
+    pc_fwd_l2_reuse_freq_dict[pc] = l2_reuse_freq
 
     if l1_fwd_mr > 0.001:
         #        outfile_perinsmr.write("#Cache-size(KB), data stream future-miss-ratio\n")
@@ -618,6 +628,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     pc_mr_dict = {}
     pc_fwd_mr_dict = {}
     pc_freq_dict = {}
+    pc_fwd_l2_l3_reuse_freq_dict = {}
+    pc_fwd_l2_reuse_freq_dict = {}
     pc_fwd_l3_reuse_freq_dict = {}
 
     analysis_type = conf.analysis_type
@@ -832,7 +844,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         if conf.per_instr_nta_analysis == 1:
             
-            pf_type = per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_accesses, pc_fwd_mr_dict, pc_fwd_l3_reuse_freq_dict, global_pc_fwd_sdist_hist, conf)
+            pf_type = per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_accesses, pc_fwd_mr_dict, pc_fwd_l2_l3_reuse_freq_dict, pc_fwd_l2_reuse_freq_dict, pc_fwd_l3_reuse_freq_dict, global_pc_fwd_sdist_hist, conf)
 
             if pf_type == 'nta':
                 isnontemporal = True
@@ -1001,15 +1013,22 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
 
     outfile_perinsmr =open(conf.outfile_perinsmr, 'w')
+    outfile_perinsntabw = open(conf.outfile_perinsntabw, 'w')
+
+    outfile_perinsntabw.write("#pc, rel. nta_bw inc, rel. l3_misses inc, rel. l2_misses inc\n")
 
     sorted_pc_freq = sorted(pc_freq_dict.iteritems(), key=operator.itemgetter(1), reverse=True)
+
+    cum_bw_inc = 0
+    cum_l2miss_inc = 0
+    cum_l3miss_inc = 0
 
     for (curr_pc, freq) in sorted_pc_freq:
 
         if curr_pc in pc_fwd_mr_dict:
             
             outfile_perinsmr.write("#Cache-size(KB), instruction's miss-ratio\n")
-            outfile_perinsmr.write("%d %lf pc: 0x%lx pc-freq: %lf l3-reuse-freq: %lf\n"%(0, 0, curr_pc, freq, pc_fwd_l3_reuse_freq_dict[curr_pc]))
+            outfile_perinsmr.write("%d %lf pc: 0x%lx pc-freq: %lf l2-l3-reuse-freq: %lf\n"%(0, 0, curr_pc, freq, pc_fwd_l2_l3_reuse_freq_dict[curr_pc]))
             sorted_cs_mr = sorted(pc_mr_dict[curr_pc].iteritems(), key=operator.itemgetter(0))
             for (cache_size, mr) in sorted_cs_mr:
                 outfile_perinsmr.write("%d %lf\n"%(cache_size, mr))
@@ -1021,9 +1040,34 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             outfile_perinsmr.write("\n")
 
+
+            fwd_mr_inc = pc_fwd_mr_dict[curr_pc][conf.l1_size] - pc_fwd_mr_dict[curr_pc][conf.l3_size]
+            r_fwd_mr_inc = round(fwd_mr_inc,1)
+            
+            #use perssimistic approach
+            if r_fwd_mr_inc > fwd_mr_inc:
+                fwd_mr_inc = r_fwd_mr_inc
+            
+            fwd_l2_mr_inc = pc_fwd_mr_dict[curr_pc][conf.l1_size] - pc_fwd_mr_dict[curr_pc][conf.l2_size]
+            r_fwd_l2_mr_inc = round(fwd_l2_mr_inc,1)
+            
+            #use perssimistic approach
+            if r_fwd_l2_mr_inc > fwd_l2_mr_inc:
+                fwd_l2_mr_inc = r_fwd_l2_mr_inc
+            
+            nta_inc_bw = float(pc_fwd_l2_l3_reuse_freq_dict[curr_pc] * fwd_mr_inc)
+            nta_inc_l2_misses = float(pc_fwd_l2_reuse_freq_dict[curr_pc] * fwd_l2_mr_inc)
+            nta_inc_l3_misses = nta_inc_bw
+            
+            cum_bw_inc += nta_inc_bw
+            cum_l2miss_inc += nta_inc_l2_misses
+            cum_l3miss_inc += nta_inc_l3_misses
+            
+            outfile_perinsntabw.write("0x%lx %lf %lf %lf %lf %lf %lf\n"%(curr_pc, nta_inc_bw, nta_inc_l3_misses, nta_inc_l2_misses, cum_bw_inc, cum_l2miss_inc, cum_l3miss_inc))
+
     outfile_pref.close()
     outfile_perinsmr.close()
-        
+    outfile_perinsntabw.close()
         
 
 def main():
