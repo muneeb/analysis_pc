@@ -578,7 +578,7 @@ def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_acc
     pc_fwd_l3_reuse_freq_dict[pc] = l3_reuse_freq
     pc_fwd_l2_reuse_freq_dict[pc] = l2_reuse_freq
 
-    if l1_fwd_mr > 0.001:
+    if True: #l1_fwd_mr > 0.001:
         #        outfile_perinsmr.write("#Cache-size(KB), data stream future-miss-ratio\n")
         #outfile_perinsmr.write("%d %lf l3-reuse-freq %lf\n"%(conf.l1_size,l1_fwd_mr, l3_reuse_freq))
         #outfile_perinsmr.write("%d %lf\n"%(conf.l2_size,l2_fwd_mr))
@@ -616,7 +616,10 @@ def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_acc
                 print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
                 return 'nta'
 
-    return 'pf'
+    if isnontemporal:
+        return 'nta'
+    else:
+        return 'pf'
 
 def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, global_pc_recur_hist, full_pc_stride_hist, global_pc_corr_hist, global_pc_sdist_hist, conf):
 
@@ -1059,9 +1062,17 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             nta_inc_l2_misses = float(pc_fwd_l2_reuse_freq_dict[curr_pc] * fwd_l2_mr_inc)
             nta_inc_l3_misses = nta_inc_bw
             
-            cum_bw_inc += nta_inc_bw
-            cum_l2miss_inc += nta_inc_l2_misses
-            cum_l3miss_inc += nta_inc_l3_misses
+            nta_max_dec_l3_misses = float(freq * pc_fwd_mr_dict[curr_pc][conf.l3_size])
+            nta_max_dec_l2_misses = float(freq * pc_fwd_mr_dict[curr_pc][conf.l2_size])
+            
+            cum_l2miss_inc += (nta_inc_l2_misses - nta_max_dec_l2_misses)
+
+            diff = nta_inc_l3_misses - nta_max_dec_l3_misses
+            cum_l3miss_inc += diff
+            cum_bw_inc += diff #nta_inc_bw
+
+
+            #outfile_perinsntabw.write("%lf %lf %lf\n"%(nta_inc_l3_misses, nta_max_dec_l3_misses, diff))
             
             outfile_perinsntabw.write("0x%lx %lf %lf %lf %lf %lf %lf\n"%(curr_pc, nta_inc_bw, nta_inc_l3_misses, nta_inc_l2_misses, cum_bw_inc, cum_l2miss_inc, cum_l3miss_inc))
 
