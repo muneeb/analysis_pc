@@ -612,7 +612,7 @@ def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_acc
                 print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
                 return 'nta'
             # when care about reuse from the LLC
-            elif (l2_fwd_mr - nta_l3_size_fwd_mr) <= 0.005:
+            elif (l1_fwd_mr - nta_l3_size_fwd_mr) <= 0.005:
                 print >> sys.stderr, "pc 0x%lx NTAed"%(pc)
                 return 'nta'
 
@@ -1065,16 +1065,16 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             nta_max_dec_l3_misses = float(freq * pc_fwd_mr_dict[curr_pc][conf.l3_size])
             nta_max_dec_l2_misses = float(freq * pc_fwd_mr_dict[curr_pc][conf.l2_size])
             
-            cum_l2miss_inc += (nta_inc_l2_misses - nta_max_dec_l2_misses)
+            cum_l2miss_inc += nta_inc_l2_misses #- nta_max_dec_l2_misses)
 
-            diff = nta_inc_l3_misses - nta_max_dec_l3_misses
-            cum_l3miss_inc += diff
+            diff = nta_inc_l3_misses #- nta_max_dec_l3_misses
+            cum_l3miss_inc += diff #nta_inc_l3_misses
             cum_bw_inc += diff #nta_inc_bw
 
 
             #outfile_perinsntabw.write("%lf %lf %lf\n"%(nta_inc_l3_misses, nta_max_dec_l3_misses, diff))
             
-            outfile_perinsntabw.write("0x%lx %lf %lf %lf %lf %lf %lf\n"%(curr_pc, nta_inc_bw, nta_inc_l3_misses, nta_inc_l2_misses, cum_bw_inc, cum_l2miss_inc, cum_l3miss_inc))
+            outfile_perinsntabw.write("0x%lx %lf %lf %lf %lf %lf %lf\n"%(curr_pc, nta_inc_bw, nta_inc_l3_misses, nta_inc_l2_misses, cum_bw_inc, cum_l3miss_inc, cum_l2miss_inc))
 
     outfile_pref.close()
     outfile_perinsmr.close()
