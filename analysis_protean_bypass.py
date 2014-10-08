@@ -162,11 +162,6 @@ class Conf:
                           action="callback", callback=self.help_nta_policies,
                           help="Display types of NTA policies available")
 
-        parser.add_option("--stride-only-analysis",
-                          type="int", default="0",
-                          dest="stride_only",
-                          help="only use stride information to generate prefetches")
-
 #parser.add_option("--help-filters",
 #                          action="callback", callback=self.help_filters,
 #                          help="Display help about the filter language.")
@@ -197,7 +192,6 @@ class Conf:
         self.l2_size = opts.l2_size
         self.l1_size = opts.l1_size
         self.all_delinq_loads = opts.all_delinq_loads
-        self.stride_only = opts.stride_only
         self.num_samples = opts.num_samples
         self.detailed_modeling = opts.detailed_modeling
         self.prefetch_decisions = {}
@@ -538,12 +532,80 @@ def is_nontemporal(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, conf):
             return False
         
         checked_pcs.append(p_pc)
-
-#    print >> sys.stderr, "data flow"
-#    for tup in pc_arr_map:
-#        print >> sys.stderr, tup
     
     return True
+
+def estimate_l2_l3_miss_inc(pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, pc_mr_dict, conf):
+
+
+    checked_pcs = []
+
+    pending_pcs = [(pc, 1.0)]
+
+    pc_arr_map = []
+
+    cum_prob = 0
+    
+    cum_l3miss_inc = 0
+    cum_l2miss_inc = 0
+
+    for pc_prob_tup in pending_pcs:
+        
+        p_pc = pc_prob_tup[0]
+        prob = float(pc_prob_tup[1])
+        
+        if p_pc in checked_pcs:
+            continue
+        
+        #not enough samples for this pc to care for it!
+        if p_pc not in global_pc_corr_hist:
+            continue
+        
+        total_count = sum(global_pc_corr_hist[p_pc].values())
+        
+        pending_pcs_list = map(lambda x: x[0], pending_pcs)
+        
+        connected_pcs = global_pc_corr_hist[p_pc].keys()
+        
+        if p_pc != pc and p_pc in pc_mr_dict and pc_mr_dict[p_pc][conf.l1_size] > 0.006:
+            connected_pcs = []
+            
+        for end_pc in connected_pcs:
+            
+            if end_pc in checked_pcs:
+                continue
+          
+            if not end_pc in pending_pcs_list:
+                
+                end_pc_prob = float(float(global_pc_corr_hist[p_pc][end_pc]) / float(total_count))
+                
+                arrival_prob = float(end_pc_prob * prob)
+                
+                #if arrival_prob is >= 10% only then do we care
+                if arrival_prob < 0.1: # not end_pc in pc_mr_dict or pc_mr_dict[end_pc][conf.l1_size] <= 0.006:
+                    continue
+
+                pending_pcs.append((end_pc, arrival_prob))
+                        
+                cum_prob += arrival_prob
+                    
+                if end_pc in pc_mr_dict:
+                    print >> sys.stderr, "l2_l3_miss_inc -- PC: 0x%lx --> 0x%lx Prob: %lf, Cum-Porb: %lf, l1-mr %lf, l3-mr: %lf"%(pc, end_pc, arrival_prob, cum_prob, pc_mr_dict[end_pc][conf.l1_size], pc_mr_dict[end_pc][conf.l3_size])
+        
+        #if miss-ratio close to zero, pop and continue
+        if p_pc == pc or not p_pc in pc_mr_dict or pc_mr_dict[p_pc][conf.l1_size] <= 0.006:
+            checked_pcs.append(p_pc)
+            continue
+
+        cum_l3miss_inc += prob * (pc_mr_dict[p_pc][conf.l1_size] - pc_mr_dict[p_pc][conf.l3_size])
+        cum_l2miss_inc += prob * (pc_mr_dict[p_pc][conf.l1_size] - pc_mr_dict[p_pc][conf.l2_size])
+        
+        checked_pcs.append(p_pc)
+
+    print >> sys.stderr, "For PC: 0x%lx, Checked subsequent PCs with execution frequency %lf of the instruction"%(pc, cum_prob)
+    print >> sys.stderr, "cum_l3miss_inc: %lf"%cum_l3miss_inc
+    return (cum_l2miss_inc, cum_l3miss_inc)
+
 
 def per_instr_nontemporal_analysis(pc, pc_freq, isnontemporal, total_sampled_accesses, pc_fwd_mr_dict, pc_fwd_l2_l3_reuse_freq_dict, pc_fwd_l2_reuse_freq_dict, pc_fwd_l3_reuse_freq_dict, global_pc_fwd_sdist_hist, conf):
 
@@ -654,130 +716,17 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     remove_pcs = []
 
     reduced_full_pc_stride_hist = reduce_stride_hist(full_pc_stride_hist)
+    
+    cumm_pc_freq = 0
 
-    if conf.stride_only == 1:
-
-        pref_pc_sd_hist = {}
-        
-
-        for pc in reduced_full_pc_stride_hist.keys():
-
-            unrolled_loop_mop = 0
-
-            sorted_x = sorted(reduced_full_pc_stride_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
-
-            max_stride = sorted_x[0][0] 
-            max_count = sorted_x[0][1]
-
-            total_stride_count = sum(full_pc_stride_hist[pc].itervalues())
-
-            max_stride_region_count = 0
-            max_stride_region = math.floor(float(max_stride) / float(32))
-                    
-            for s,c in full_pc_stride_hist[pc].items():
-            
-                if math.floor(float(s) / float(32)) == max_stride_region:
-                    max_stride_region_count += c
-
-            if float(float(max_count) / float(total_stride_count)) < float(0.7):
-                continue
-            
-            stride = max_stride
-
-            sorted_x = sorted(global_pc_recur_hist[pc].iteritems(), key=operator.itemgetter(1), reverse=True)
-
-            weight = 0
-            avg_r = 0
-
-            for r, c in sorted_x:
-                avg_r += int(r) * int(c)
-                weight += int(c)
-
-            avg_r = round(float(avg_r)/ float(weight))
-
-            if avg_r == 0:
-                avg_r = 1
-
-            recur_freq = sorted(global_pc_recur_hist[pc].values(), reverse=True) 
-            recur_freq_thr = 200 #int(recur_freq[0])/6
-            recur_freq_out_loop = filter(lambda y: y > recur_freq_thr, recur_freq)
-            recur_freq_in_loop = filter(lambda y: y <= recur_freq_thr, recur_freq)
-
-            loop_recur_freq = sum(recur_freq_in_loop)
-            loop_reach_freq = sum(recur_freq_out_loop)
-
-            if loop_reach_freq == 0:
-                loop_reach_freq = 1
- 
-            avg_iters = float(float(loop_recur_freq)/float(loop_reach_freq))
-                
-            if avg_iters == 0:
-                avg_iters = 1
-
-            if abs(stride) < cache_line_size:
-                    
-                no_iters = int(round(float(cache_line_size) / float(abs(stride)) )) - 1
-
-                if no_iters == 0:
-                    no_iters = 1
-
-                pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters ))
-                    
-                if pd == 0:
-                    pd = 1 
-                        
-                if stride < 0:
-                    pd = -1 * pd
-
-                sd = cache_line_size * pd
-                stride = cache_line_size
-                
-            else:
-            
-                no_iters = 1
-
-                pd = math.ceil(float(avg_mem_latency) / float(avg_r * cyc_per_mop * no_iters))
-
-                if pd == 0:
-                    pd = 1 
-
-                if stride < 0:
-                    pd = -1 * pd
-
-                sd = stride * pd
-            
-#           for pc_x in pref_pc_sd_hist.keys():
-#                if abs(pc_x - pc) <= 50  and pref_pc_sd_hist[pc_x] == sd:
-                    #loop unrolling possibility
-#                    print >> sys.stderr, pc_x, pc, pref_pc_sd_hist[pc_x], sd
-#                    unrolled_loop_mop = 1
-#                    break
-
-            pref_pc_sd_hist[pc] = sd
-
-            if conf.detailed_modeling == 1:
-                if (avg_iters/2) < pd:
-                    pd = math.ceil(float(avg_iters)/float(2)) 
-                    sd = stride * pd 
-
-#            if unrolled_loop_mop == 0:
-            print"%ld:pf:%d"%(pc, int(sd))
-
-        return
-
-    for pc in global_prefetchable_pcs:
+    for pc in global_pc_sdist_hist.keys(): #global_prefetchable_pcs:
 
         if not pc in reduced_full_pc_stride_hist.keys():
             continue
 
-#        if not pc in global_pc_corr_hist.keys():
-#            continue
-
         pf_type = 'pf'
 
         total_accesses = sum(global_pc_sdist_hist[pc].values())
-
-#        non_l1_accesses = 0
 
         max_sdist = max(global_pc_sdist_hist[pc].keys())
         
@@ -805,20 +754,16 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         pc_freq = round(float(total_accesses)/float(total_sampled_accesses),4)
         
+        cumm_pc_freq += pc_freq
+        
         pc_mr_dict[pc] = {conf.l1_size: l1_mr, conf.l2_size: l2_mr, conf.l3_size: l3_mr}
         pc_freq_dict[pc] = pc_freq
-
-#        outfile_perinsmr.write("#Cache-size(KB), instruction's data miss-ratio\n")
-#        outfile_perinsmr.write("%d %lf pc: 0x%lx pc-freq: %lf\n"%(conf.l1_size, l1_mr, pc, pc_freq))
-#        outfile_perinsmr.write("%d %lf\n"%(conf.l2_size, l2_mr))
-#        outfile_perinsmr.write("%d %lf\n"%(conf.l3_size, l3_mr))
-
 
         if conf.detailed_modeling == 1:
             
             cb_score = float(1)/float(avg_mem_latency)
             if l1_mr < cb_score and l3_mr < 0.005:
-                print >> sys.stderr, "\ncb-ignored pc-hex:%lx   pc:%ld" % (pc, pc)
+                print >> sys.stderr, "\ncb-ignoredf pc-hex:%lx   pc:%ld" % (pc, pc)
                 print >> sys.stderr, "L1 MR %lf%%, L2 MR %lf%%, L3_MR %lf%%, -- %s: dataset size: %lf MB"%(l1_mr, l2_mr, l3_mr, hex(pc), float(max_sdist * conf.line_size / (1024*1024)))
                 continue
 
@@ -1014,6 +959,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         outfile_pref.write("0x%lx:%s:%d\n"%(pc, pf_type, int(sd)))
             #        print"0x%lx:%s:%d"%(pc, pf_type, int(sd))
 
+    print >> sys.stderr, "Cumulative freq: %lf"%(cumm_pc_freq)
 
     outfile_perinsmr =open(conf.outfile_perinsmr, 'w')
     outfile_perinsntabw = open(conf.outfile_perinsntabw, 'w')
@@ -1043,22 +989,28 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             outfile_perinsmr.write("\n")
 
+            inc_freq = pc_fwd_l2_l3_reuse_freq_dict[curr_pc]
+            if pc_fwd_mr_dict[curr_pc][conf.l1_size] <= 0.006:
+                (fwd_l2_mr_inc, fwd_mr_inc) = estimate_l2_l3_miss_inc(curr_pc, global_pc_corr_hist, global_pc_fwd_sdist_hist, pc_mr_dict, conf)
+                inc_freq = pc_freq_dict[curr_pc]
+            else:
+                fwd_mr_inc = pc_fwd_mr_dict[curr_pc][conf.l1_size] - pc_fwd_mr_dict[curr_pc][conf.l3_size]
+                fwd_l2_mr_inc = pc_fwd_mr_dict[curr_pc][conf.l1_size] - pc_fwd_mr_dict[curr_pc][conf.l2_size]
 
-            fwd_mr_inc = pc_fwd_mr_dict[curr_pc][conf.l1_size] - pc_fwd_mr_dict[curr_pc][conf.l3_size]
             r_fwd_mr_inc = round(fwd_mr_inc,1)
-            
+                
             #use perssimistic approach
             if r_fwd_mr_inc > fwd_mr_inc:
                 fwd_mr_inc = r_fwd_mr_inc
             
-            fwd_l2_mr_inc = pc_fwd_mr_dict[curr_pc][conf.l1_size] - pc_fwd_mr_dict[curr_pc][conf.l2_size]
             r_fwd_l2_mr_inc = round(fwd_l2_mr_inc,1)
             
             #use perssimistic approach
             if r_fwd_l2_mr_inc > fwd_l2_mr_inc:
                 fwd_l2_mr_inc = r_fwd_l2_mr_inc
-            
-            nta_inc_bw = float(pc_fwd_l2_l3_reuse_freq_dict[curr_pc] * fwd_mr_inc)
+                
+            inc_freq = pc_freq_dict[curr_pc]
+            nta_inc_bw = float(inc_freq * fwd_mr_inc)
             nta_inc_l2_misses = float(pc_fwd_l2_reuse_freq_dict[curr_pc] * fwd_l2_mr_inc)
             nta_inc_l3_misses = nta_inc_bw
             
@@ -1070,7 +1022,6 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             diff = nta_inc_l3_misses #- nta_max_dec_l3_misses
             cum_l3miss_inc += diff #nta_inc_l3_misses
             cum_bw_inc += diff #nta_inc_bw
-
 
             #outfile_perinsntabw.write("%lf %lf %lf\n"%(nta_inc_l3_misses, nta_max_dec_l3_misses, diff))
             
