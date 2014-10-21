@@ -20,18 +20,25 @@ import missratio
 import redirect_analysis
 import trace_analysis
 import ins_trace_analysis
+import subprocess
 
 __version__ = "$Revision$"
 
 class PrefParams:
 
-    def __init__(self, delinq_load_addr, pf_type, pd, l1_mr, l2_mr, l3_mr):
+    def __init__(self, delinq_load_addr, pf_type, sd, l1_mr, l2_mr, l3_mr):
         self.delinq_load_addr = delinq_load_addr
         self.pf_type = pf_type
-        self.pd = pd
+        self.sd = sd
         self.l1_mr = l1_mr
         self.l2_mr = l2_mr
         self.l3_mr = l3_mr
+
+    def get_pf_type(self):
+        return self.pf_type
+
+    def get_sd(self):
+        return self.sd
 
 
 class Conf:
@@ -153,6 +160,11 @@ class Conf:
                             dest="nta_policy",
                             help="NTA policy")
                             
+        parser.add_option("--convert-to-IR-info-map",
+                          type="int", default="1",
+                          dest="convert_to_ir_info_map",
+                          help="Create info comparable to IR in addition to instruction addresses")
+                          
         parser.add_option("--no-nta-on-data-reuse",
                           type="int", default="1",
                           dest="no_nta_on_reuse",
@@ -205,6 +217,7 @@ class Conf:
         self.no_nta_on_reuse = opts.no_nta_on_reuse
         self.nta_policy = opts.nta_policy
         self.outfile_perinsntabw = opts.outfile_perinsntabw
+        self.convert_to_ir_info_map = opts.convert_to_ir_info_map
 
     def help_nta_policies(self, option, opt, value, parser):
         print "There are different policies depending on how you wish to configure cache bypassing"
@@ -690,6 +703,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     cache_line_size = conf.line_size
 
 
+    pc_stride_dict = {}
+
     pc_mr_dict = {}
     pc_fwd_mr_dict = {}
     pc_freq_dict = {}
@@ -818,14 +833,28 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         max_stride_region_freq = float(float(max_stride_region_count) / float(total_stride_count))
 
         if max_stride_region_freq < float(0.7):
+            pc_stride_dict[pc] = False
             remove_pcs.append(pc)
 
             if conf.all_delinq_loads == 1 and isnontemporal:
-                outfile_pref.write("0x%lx:%s:%d\n"%(pc, pf_type, 0))
+                
+                pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%pc], stdout=subprocess.PIPE).communicate()[0]
+        
+                pc_ir_map_str = pc_ir_map_str.rstrip()
+                if pc_ir_map_str != '':
+                    sd = 0
+                    outfile_pref.write("%s:0x%lx:%s:%d\n"%(pc_ir_map_str, pc, pf_type, sd))
+
+                    #add prefetch decision to central data structure
+                    pref_param = PrefParams(pc, pf_type, sd, l1_mr, l2_mr, l3_mr)
+                    conf.prefetch_decisions[pc] = pref_param
+
+        
+                #outfile_pref.write("0x%lx:%s:%d\n"%(pc, pf_type, 0))
 
             continue
  
-
+        pc_stride_dict[pc] = True
         print >> sys.stderr, "regular strided load (L1 MR %lf%%, L2 MR %lf%%, L3_MR %lf%%, max stride region ratio %lf -- %s): dataset size: %lf MB"%(l1_mr, l2_mr, l3_mr, 
                     float(float(max_stride_region_count) / float(total_stride_count)), hex(pc),  float(max_sdist * conf.line_size / (1024*1024)) )
         
@@ -952,16 +981,20 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 #                print >> sys.stderr, "stride doubled for non temporal access (load from DRAM)"
     
         #add prefetch decision to central data structure
-        pref_param = PrefParams(pc, pf_type, pd, l1_mr, l2_mr, l3_mr)
+        pref_param = PrefParams(pc, pf_type, sd, l1_mr, l2_mr, l3_mr)
         conf.prefetch_decisions[pc] = pref_param
         
-#        if total_count > 50:
-        outfile_pref.write("0x%lx:%s:%d\n"%(pc, pf_type, int(sd)))
-            #        print"0x%lx:%s:%d"%(pc, pf_type, int(sd))
+        pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%pc], stdout=subprocess.PIPE).communicate()[0]
+
+        pc_ir_map_str = pc_ir_map_str.rstrip()
+
+        if pc_ir_map_str != '':
+            outfile_pref.write("%s:0x%lx:%s:%d\n"%(pc_ir_map_str, pc, pf_type, int(sd)))
+
 
     print >> sys.stderr, "Cumulative freq: %lf"%(cumm_pc_freq)
 
-    outfile_perinsmr =open(conf.outfile_perinsmr, 'w')
+    outfile_perinsmr = open(conf.outfile_perinsmr, 'w')
     outfile_perinsntabw = open(conf.outfile_perinsntabw, 'w')
 
     outfile_perinsntabw.write("#pc, rel. nta_bw inc, rel. l3_misses inc, rel. l2_misses inc\n")
@@ -971,6 +1004,8 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     cum_bw_inc = 0
     cum_l2miss_inc = 0
     cum_l3miss_inc = 0
+
+    pc_nta_l3_miss_inc_dict = {}
 
     for (curr_pc, freq) in sorted_pc_freq:
 
@@ -1010,7 +1045,12 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
                 fwd_l2_mr_inc = r_fwd_l2_mr_inc
                 
             inc_freq = pc_freq_dict[curr_pc]
+            
+            #nta_inc_bw = 0
+            #if pc is strided, the increase in BW will be proportional. Expect no increase in BW for random accesses
+            #if pc in pc_stride_dict and pc_stride_dict[pc]:
             nta_inc_bw = float(inc_freq * fwd_mr_inc)
+            
             nta_inc_l2_misses = float(pc_fwd_l2_reuse_freq_dict[curr_pc] * fwd_l2_mr_inc)
             nta_inc_l3_misses = nta_inc_bw
             
@@ -1021,11 +1061,32 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             diff = nta_inc_l3_misses #- nta_max_dec_l3_misses
             cum_l3miss_inc += diff #nta_inc_l3_misses
-            cum_bw_inc += diff #nta_inc_bw
+            cum_bw_inc += nta_inc_bw
+            
+            pc_nta_l3_miss_inc_dict[curr_pc] = nta_inc_l3_misses
 
             #outfile_perinsntabw.write("%lf %lf %lf\n"%(nta_inc_l3_misses, nta_max_dec_l3_misses, diff))
             
             outfile_perinsntabw.write("0x%lx %lf %lf %lf %lf %lf %lf\n"%(curr_pc, nta_inc_bw, nta_inc_l3_misses, nta_inc_l2_misses, cum_bw_inc, cum_l3miss_inc, cum_l2miss_inc))
+
+    sorted_x = sorted(pc_nta_l3_miss_inc_dict.iteritems(), key=operator.itemgetter(1))
+
+    for (curr_pc, cum_l3miss_inc) in sorted_x:
+    
+        pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%curr_pc], stdout=subprocess.PIPE).communicate()[0]
+        
+        pc_ir_map_str = pc_ir_map_str.rstrip()
+        
+        sd = 0
+        pf_type='ntaopp' # nta opportunistic
+        if curr_pc in conf.prefetch_decisions and conf.prefetch_decisions[curr_pc].get_pf_type() == 'nta':
+            continue
+        
+        if curr_pc in conf.prefetch_decisions:
+            sd = conf.prefetch_decisions[curr_pc].get_sd()
+
+        if pc_ir_map_str != '':
+            outfile_pref.write("%s:0x%lx:%s:%d\n"%(pc_ir_map_str, curr_pc, pf_type, int(sd)))
 
     outfile_pref.close()
     outfile_perinsmr.close()
