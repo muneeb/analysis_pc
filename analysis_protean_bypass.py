@@ -838,12 +838,16 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
             if conf.all_delinq_loads == 1 and isnontemporal:
                 
-                pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%pc], stdout=subprocess.PIPE).communicate()[0]
+                #pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%pc], stdout=subprocess.PIPE).communicate()[0]
         
+                pc_ir_map_str = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*'", shell=True, stdout=subprocess.PIPE).communicate()[0]
+
+                func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | tr -d REP4PRT", shell=True, stdout=subprocess.PIPE).communicate()[0]
+
                 pc_ir_map_str = pc_ir_map_str.rstrip()
                 if pc_ir_map_str != '':
                     sd = 0
-                    outfile_pref.write("%s:0x%lx:%s:%d\n"%(pc_ir_map_str, pc, pf_type, sd))
+                    outfile_pref.write("%s:%s:0x%lx:%s:%d\n"%(func_name.rstrip(), pc_ir_map_str, pc, pf_type, sd))
 
                     #add prefetch decision to central data structure
                     pref_param = PrefParams(pc, pf_type, sd, l1_mr, l2_mr, l3_mr)
@@ -984,12 +988,16 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         pref_param = PrefParams(pc, pf_type, sd, l1_mr, l2_mr, l3_mr)
         conf.prefetch_decisions[pc] = pref_param
         
-        pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%pc], stdout=subprocess.PIPE).communicate()[0]
+        #pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%pc], stdout=subprocess.PIPE).communicate()[0]
+
+        pc_ir_map_str = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*'", shell=True, stdout=subprocess.PIPE).communicate()[0]
+
+        func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | tr -d REP4PRT", shell=True, stdout=subprocess.PIPE).communicate()[0]
 
         pc_ir_map_str = pc_ir_map_str.rstrip()
 
         if pc_ir_map_str != '':
-            outfile_pref.write("%s:0x%lx:%s:%d\n"%(pc_ir_map_str, pc, pf_type, int(sd)))
+            outfile_pref.write("%s:%s:0x%lx:%s:%d\n"%(func_name.rstrip(), pc_ir_map_str, pc, pf_type, int(sd)))
 
 
     print >> sys.stderr, "Cumulative freq: %lf"%(cumm_pc_freq)
@@ -1073,8 +1081,12 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
     for (curr_pc, cum_l3miss_inc) in sorted_x:
     
-        pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%curr_pc], stdout=subprocess.PIPE).communicate()[0]
+    #pc_ir_map_str = subprocess.Popen(["/home/muneeb/git/scripts/obj-intel64/BinAddr2FuncMemOp", "-i", conf.exec_file, "-x", "0x%lx"%curr_pc], stdout=subprocess.PIPE).communicate()[0]
+    
+        pc_ir_map_str = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(curr_pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*'", shell=True, stdout=subprocess.PIPE).communicate()[0]
         
+        func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | tr -d REP4PRT", shell=True, stdout=subprocess.PIPE).communicate()[0]
+    
         pc_ir_map_str = pc_ir_map_str.rstrip()
         
         sd = 0
@@ -1086,7 +1098,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
             sd = conf.prefetch_decisions[curr_pc].get_sd()
 
         if pc_ir_map_str != '':
-            outfile_pref.write("%s:0x%lx:%s:%d\n"%(pc_ir_map_str, curr_pc, pf_type, int(sd)))
+            outfile_pref.write("%s:%s:0x%lx:%s:%d\n"%(func_name.rstrip(), pc_ir_map_str, curr_pc, pf_type, int(sd)))
 
     outfile_pref.close()
     outfile_perinsmr.close()
