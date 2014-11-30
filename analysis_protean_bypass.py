@@ -842,7 +842,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
         
                 pc_ir_map_str = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*'", shell=True, stdout=subprocess.PIPE).communicate()[0]
 
-                func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | tr -d REP4PRT", shell=True, stdout=subprocess.PIPE).communicate()[0]
+                func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | sed 's/REP4PRT//g'", shell=True, stdout=subprocess.PIPE).communicate()[0]
 
                 pc_ir_map_str = pc_ir_map_str.rstrip()
                 if pc_ir_map_str != '':
@@ -992,13 +992,14 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
 
         pc_ir_map_str = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*'", shell=True, stdout=subprocess.PIPE).communicate()[0]
 
-        func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | tr -d REP4PRT", shell=True, stdout=subprocess.PIPE).communicate()[0]
+        func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | sed 's/REP4PRT//g'", shell=True, stdout=subprocess.PIPE).communicate()[0]
 
         pc_ir_map_str = pc_ir_map_str.rstrip()
 
         if pc_ir_map_str != '':
             outfile_pref.write("%s:%s:0x%lx:%s:%d\n"%(func_name.rstrip(), pc_ir_map_str, pc, pf_type, int(sd)))
 
+    return
 
     print >> sys.stderr, "Cumulative freq: %lf"%(cumm_pc_freq)
 
@@ -1085,7 +1086,7 @@ def generate_pref_pcs_info(global_prefetchable_pcs, global_pc_fwd_sdist_hist, gl
     
         pc_ir_map_str = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(curr_pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*'", shell=True, stdout=subprocess.PIPE).communicate()[0]
         
-        func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | tr -d REP4PRT", shell=True, stdout=subprocess.PIPE).communicate()[0]
+        func_name = subprocess.Popen("objdump -d "+conf.exec_file+" | grep "+"0%lx"%(pc)+" | grep -oh 'REP4PRT[[:alnum:]*[_]*]*' | sed 's/m[[:digit:]]\+[rw][[:digit:]]\+//g' | sed 's/REP4PRT//g'", shell=True, stdout=subprocess.PIPE).communicate()[0]
     
         pc_ir_map_str = pc_ir_map_str.rstrip()
         
